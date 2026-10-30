@@ -1,4 +1,4 @@
-"""juhkff 综合插件：主动群聊 / 卡片解析 / 偷表情 / 日报 / 群聊统计 / Pixiv 订阅 / 帮助图。
+"""juhkff 综合插件：主动群聊 / 卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图。
 
 移植自 Yunzai 插件 juhkff-plugin（https://github.com/juhkff/juhkff-plugin）。
 
@@ -10,7 +10,7 @@
 2. `_dispatch` —— 一条消息如何分发给各模块；
 3. `juhkff_modules/common.py` —— 配置、定时器、模块基类；
 4. 各功能模块（active_chat / share_parse / emoji_steal / daily_report /
-   chat_stats / pixiv_push / help_gen）。
+   pixiv_push / help_gen）。
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ for _name, _module in list(sys.modules.items()):
 
 from juhkff_modules import common  # noqa: E402
 from juhkff_modules.active_chat import ActiveChatModule  # noqa: E402
-from juhkff_modules.chat_stats import ChatStatsModule  # noqa: E402
 from juhkff_modules.daily_report import DailyReportModule  # noqa: E402
 from juhkff_modules.emoji_steal import EmojiStealModule  # noqa: E402
 from juhkff_modules.help_gen import HelpGenModule  # noqa: E402
@@ -85,7 +84,6 @@ class JuhkffPlugin(Star):
                 ShareParseModule(self),
                 EmojiStealModule(self),
                 DailyReportModule(self),
-                ChatStatsModule(self),
                 PixivPushModule(self),
                 HelpGenModule(self),
             )

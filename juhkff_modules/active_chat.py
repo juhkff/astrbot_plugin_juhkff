@@ -6,7 +6,7 @@
   `defaultChatRate` / `groupChatRate` 里的概率掷骰子；**没有冷却、没有最小消息数**；
 - 指令消息：以唤醒前缀（AstrBot 全局 `wake_prefix`，默认 `/`）开头的消息、
   `@全体成员` 这类「被唤醒但不是在叫机器人」的消息，既不写历史也不回复，
-  避免 `/统计`、`/juhkff` 被当成闲聊抢答。判断直接复用框架置好的
+  避免 `/juhkff`、`#帮助` 被当成闲聊抢答。判断直接复用框架置好的
   `event.is_at_or_wake_command`，再用「真 @ / 引用回复」把它和本次要接的话区分开；
 - 上下文：`useContext` 打开时，把最近 `maxHistoryLength` 条群消息作为
   `contexts` 结构化传给 `llm_generate`（别人的是 user、自己的是 assistant）；
@@ -429,7 +429,7 @@ class ActiveChatModule(BaseModule):
     def _called(cls, event: AstrMessageEvent) -> bool:
         """这一条是不是在「叫」机器人：真 @ 或被引用回复。
 
-        不能用 `event.is_at_or_wake_command`：`/统计`、`/juhkff` 这类唤醒前缀
+        不能用 `event.is_at_or_wake_command`：`/juhkff`、`#帮助` 这类唤醒前缀
         指令也会让它为真，`default_reply_at_bot` 打开时就会去抢指令消息。
         """
         return cls._at_me(event) or cls._replied_to_me(event)

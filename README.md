@@ -11,7 +11,6 @@
 | `emoji_steal` | 偷表情（按群内重复出现的图片收藏） | ✅ 已实现 |
 | `daily_report` | 日报简报（一言 / 60 秒读世界 / B 站热搜 / IT 之家 / 番剧日历） | ✅ 已实现 |
 | `active_chat` | 主动群聊（概率接话 / @ 必回 / 多 Key / 群内概率覆盖） | ✅ 已实现 |
-| `chat_stats` | 群聊统计（发言榜 / 时段 / 热词，`/统计`，额外保留） | ✅ 已实现 |
 | `pixiv_push` | Pixiv 榜单新图订阅推送 | ✅ 已实现 |
 | `help` | 帮助图（`#帮助`，HTML 渲染） | ✅ 已实现 |
 
@@ -51,7 +50,6 @@ Redis 历史需要 `redis>=5.0`（插件 requirements.txt 已声明，框架加�
 | `/juhkff` | 查看插件状态、各模块启停、数据目录 |
 | `#帮助` | 生成一张帮助图（功能列表） |
 | `#日报` / `/日报` | 生成今日简报（一言、60 秒读世界、B 站热搜、IT 之家、番剧） |
-| `/统计` | 本群当天活跃度统计（发言榜 / 时段 / 热词） |
 | `/pixiv` | 查看最近一次抓到的 Pixiv 作品 |
 
 ## 数据目录
@@ -62,7 +60,6 @@ data/plugin_data/astrbot_plugin_juhkff/
 ├── emoji_library.json   # 表情索引
 ├── fingerprints.json    # 图片指纹 + 窗口内出现次数
 ├── daily_report.png     # 日报简报缓存（预生成）
-├── report.db            # 群聊统计数据（SQLite）
 ├── pixiv/               # 已下载的 Pixiv 图片
 └── pixiv_seen.json      # 已推送过的作品 id
 ```
@@ -79,8 +76,6 @@ data/plugin_data/astrbot_plugin_juhkff/
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
   `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数，用 Jinja2 模板交给
   AstrBot 的 HTML 渲染器出图；`#日报` 即时生成，`daily_report_time` 定时推送。
-- **群聊统计**：上游没有这个功能，是额外保留的。插件自己把每条消息写进 SQLite
-  （`report.db`），`/统计` 看当天数据，`push_time` 到点推 `groups`。
 - **一个调试开关**：`global.debug`（全局设置 → 调试日志）打开后，各模块的明细
   （Redis、抓链接失败原因、模型能力判断等）用 INFO 输出，主动群聊还会打印每次
   请求的 system 人设、本条 user 消息与历史条数；内容含聊天原文，排查完要关。
@@ -88,7 +83,7 @@ data/plugin_data/astrbot_plugin_juhkff/
   `default_reply_at_bot` 必回，否则按 `default_chat_rate` 掷骰子，没有冷却也没有最小
   消息数；`group_chat_rate` 按群覆盖概率与「被叫必回」；以唤醒前缀（AstrBot 全局
   `wake_prefix`，默认 `/`）开头的消息、以及 `@全体` 这类「被唤醒但不是在叫它」的消息
-  按指令处理，不记录也不回复，避免和 `/统计`、`/juhkff` 抢；`use_context + max_history_length` 决定带多少条上下文；
+  按指令处理，不记录也不回复，避免和 `/juhkff`、`#帮助` 抢；`use_context + max_history_length` 决定带多少条上下文；
   `chat_prompts + chat_prompt_apply` 选人设（支持 `{{botName}}`）；`attach_url_analysis`
   会先抓消息里链接的正文；图片两头都带：
   - 当前回合的图经 `image_urls` 直接给多模态模型看；
@@ -144,8 +139,6 @@ data/plugin_data/astrbot_plugin_juhkff/
 - 「帮助图」已按上游行为移植，改为复用 AstrBot 的 HTML 渲染，不依赖 Yunzai 的渲染器与字体资源。
 - Pixiv 上游是「按画师订阅 + 可选 R18」，这里仍是「榜单新图」；画师订阅与
   AI 生成（豆包视频/图片、SiliconFlow 语音）尚未移植。
-- 「日报」早先被误实现成群聊统计，现已按上游改回新闻简报；统计能力拆到
-  `chat_stats`（`/统计`）单独保留，不想要可以直接在配置里关掉或删掉该分组。
 - 主动群聊已移除早期版本自造的 `reply_mode=random`、`interval_sec`、`min_messages`、
   `trigger_mode/keywords`、`whitelist` 等上游没有的项；`useEmotion` 每日心情也去掉了
   （实测用处不大，且每天要额外调一次模型）。

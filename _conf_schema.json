@@ -62,7 +62,7 @@
         "description": "被 @ / 引用回复时必定回复",
         "type": "bool",
         "default": true,
-        "hint": "上游 defaultReplyAtBot；唤醒前缀消息（如 /统计）不算在内"
+        "hint": "上游 defaultReplyAtBot；唤醒前缀消息（如 /juhkff）不算在内"
       },
       "group_chat_rate": {
         "description": "分群概率覆盖",
@@ -344,57 +344,6 @@
         "description": "预生成时间（cron）",
         "type": "string",
         "default": "0 0 10 * * ?"
-      }
-    }
-  },
-  "chat_stats": {
-    "type": "object",
-    "description": "群聊统计",
-    "hint": "统计每个群当天的活跃度与热词，可手动 /统计 查看，也可定时推送。这是额外保留的统计能力，不是上游的「日报」",
-    "items": {
-      "enable": {
-        "description": "启用",
-        "type": "bool",
-        "default": false
-      },
-      "push_time": {
-        "description": "推送时间",
-        "type": "string",
-        "default": "23:59",
-        "hint": "24 小时制 HH:MM"
-      },
-      "groups": {
-        "description": "推送目标",
-        "type": "list",
-        "default": [],
-        "hint": "填写群的 UMO；留空则不推送，只能在群里发 /统计 查看"
-      },
-      "top_n": {
-        "description": "榜单人数",
-        "type": "int",
-        "default": 5
-      },
-      "render_mode": {
-        "description": "渲染方式",
-        "type": "string",
-        "default": "text",
-        "options": [
-          "text",
-          "image"
-        ],
-        "hint": "image 需要 Pillow 与可用中文字体"
-      },
-      "font_path": {
-        "description": "字体路径",
-        "type": "string",
-        "default": "",
-        "hint": "render_mode=image 时使用，留空尝试系统默认中文字体"
-      },
-      "retention_days": {
-        "description": "数据保留天数",
-        "type": "int",
-        "default": 90,
-        "hint": "超过天数的消息记录会被清理"
       }
     }
   },
