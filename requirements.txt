@@ -1,0 +1,10 @@
+# 核心 HTTP 由 AstrBot 自带 aiohttp 提供，无需重复声明
+# 日报图片渲染
+pillow>=10.0.0
+
+# 可选：Pixiv 的 app 后端（backend=app 时才需要）
+# 不装也能用 backend=web（纯 aiohttp + PHPSESSID）
+# pixivpy3>=3.7.5
+
+# 主动群聊历史存储（不装则自动退回内存）
+redis>=5.0.0

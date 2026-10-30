@@ -1,0 +1,6 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 插件运行时数据（测试/调试产物，真实数据在 AstrBot/data/plugin_data/）
+data/

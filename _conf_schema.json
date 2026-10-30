@@ -1,0 +1,480 @@
+{
+  "global": {
+    "type": "object",
+    "description": "全局设置",
+    "hint": "总开关、代理、时区等所有功能共用的配置",
+    "items": {
+      "enabled": {
+        "description": "总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后本插件所有功能都不工作"
+      },
+      "debug": {
+        "description": "详细日志",
+        "type": "bool",
+        "default": false,
+        "hint": "打开后各模块的明细用 INFO 输出（Redis、链接抓取失败原因、模型能力判断等），主动群聊还会打印每次请求的 system、user 消息与历史条数；内容含聊天原文"
+      },
+      "proxy": {
+        "description": "HTTP 代理",
+        "type": "string",
+        "default": "",
+        "hint": "留空则直连，例如 http://127.0.0.1:7890"
+      },
+      "timezone": {
+        "description": "时区",
+        "type": "string",
+        "default": "Asia/Shanghai",
+        "hint": "日报的\"今天\"按这个时区计算"
+      }
+    }
+  },
+  "active_chat": {
+    "type": "object",
+    "description": "主动群聊",
+    "hint": "在群里有概率主动插话。配置项与上游 autoReply 一致：没有冷却、没有最小消息数，只有概率和 @ 必回",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "provider": {
+        "description": "AstrBot 对话模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空则用当前会话绑定的对话模型；都没有时取 AstrBot 里第一个可用的对话模型"
+      },
+      "default_chat_rate": {
+        "description": "默认接话概率",
+        "type": "float",
+        "default": 0.1,
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "hint": "上游 defaultChatRate；没被叫到时按这个概率掷骰子"
+      },
+      "default_reply_at_bot": {
+        "description": "被 @ / 引用回复时必定回复",
+        "type": "bool",
+        "default": true,
+        "hint": "上游 defaultReplyAtBot；唤醒前缀消息（如 /统计）不算在内"
+      },
+      "group_chat_rate": {
+        "description": "分群概率覆盖",
+        "type": "template_list",
+        "hint": "上游 groupChatRate；群号命中后覆盖默认概率与 @ 行为",
+        "templates": {
+          "rule": {
+            "name": "分群规则",
+            "items": {
+              "group_list": {
+                "description": "群号列表",
+                "type": "list",
+                "default": [],
+                "hint": "填群号（UMO 里第三段）"
+              },
+              "chat_rate": {
+                "description": "接话概率",
+                "type": "float",
+                "default": 0.1,
+                "slider": {
+                  "min": 0,
+                  "max": 1,
+                  "step": 0.05
+                }
+              },
+              "reply_at_bot": {
+                "description": "被 @ / 引用回复时必定回复",
+                "type": "bool",
+                "default": true
+              }
+            }
+          }
+        }
+      },
+      "chat_prompts": {
+        "description": "接话人设（role=system 提示词）",
+        "type": "template_list",
+        "hint": "就是发给模型的 system 内容，改完保存即生效；可用 {{botName}} 占位机器人昵称",
+        "templates": {
+          "prompt": {
+            "name": "人设",
+            "display_item": "name",
+            "items": {
+              "name": {
+                "description": "人设名称",
+                "type": "string",
+                "default": "普通群友"
+              },
+              "prompt": {
+                "description": "人设提示词",
+                "type": "text",
+                "default": ""
+              }
+            }
+          }
+        },
+        "default": [
+          {
+            "__template_key": "prompt",
+            "name": "默认",
+            "prompt": "你在一个QQ群聊里，扮演一名普通群员参与聊天。\n只输出一条要发到群里的消息：不要用括号写动作或旁白，不要换行，不要以「回复xx」开头，句尾不加标点；不要解释思路，也不要带日期和昵称。\n你在群里的昵称是{{botName}}。\n\n请像普通群员那样接着最新这条说一句话，只输出要发的内容本身。\n更早的消息只是聊天背景：不要回复它们，不要续写它们，也不要复述里面的「当时」之类标记。"
+          }
+        ]
+      },
+      "chat_prompt_apply": {
+        "description": "生效人设",
+        "type": "string",
+        "default": "默认",
+        "hint": "填 chat_prompts 里的名字；留空用第一条（上游默认值为「默认」）"
+      },
+      "use_context": {
+        "description": "携带聊天上下文",
+        "type": "bool",
+        "default": true
+      },
+      "max_history_length": {
+        "description": "上下文条数",
+        "type": "int",
+        "default": 5,
+        "hint": "上游 maxHistoryLength；取最近多少条群消息拼进上下文"
+      },
+      "history_ttl_hours": {
+        "description": "历史过期时间（小时）",
+        "type": "int",
+        "default": 12,
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 1
+        },
+        "hint": "0 表示不过期；默认 12 小时，对齐上游 EX 12*60*60：最后一条消息之后过这么久整段历史自动消失"
+      },
+      "redis_url": {
+        "description": "Redis 地址",
+        "type": "string",
+        "default": "redis://127.0.0.1:6379/0",
+        "hint": "主动群聊的历史存在这里；留空或连不上时不记录历史（只按当前消息回复）。格式 redis://[:密码@]主机:端口/库号"
+      },
+      "redis_key_prefix": {
+        "description": "Redis Key 前缀",
+        "type": "string",
+        "default": "juhkff:active_chat",
+        "hint": "实际的 key 是「前缀:会话UMO」，多个机器人共用同一个 Redis 时用来隔离"
+      },
+      "clear_history_on_start": {
+        "description": "启动时清空历史聊天数据",
+        "type": "bool",
+        "default": true,
+        "hint": "重启机器人时清空历史（WebUI 里保存配置触发的热重载不会清）；关掉则重启后继续用旧上下文"
+      },
+      "attach_url_analysis": {
+        "description": "附带链接分析",
+        "type": "bool",
+        "default": false,
+        "hint": "上游 attachUrlAnalysis；先抓消息里链接的正文再让模型接话"
+      }
+    }
+  },
+  "share_parse": {
+    "type": "object",
+    "description": "卡片解析",
+    "hint": "识别 B 站、小黑盒等分享卡片，补上标题、作者、封面",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "parse_bilibili": {
+        "description": "解析 B 站分享",
+        "type": "bool",
+        "default": true
+      },
+      "parse_xiaoheihe": {
+        "description": "解析小黑盒分享",
+        "type": "bool",
+        "default": true
+      },
+      "parse_generic": {
+        "description": "解析通用链接",
+        "type": "bool",
+        "default": true,
+        "hint": "卡片里只带一条 URL 且没有标题时，抓取网页标题"
+      },
+      "fetch_cover": {
+        "description": "附带封面图",
+        "type": "bool",
+        "default": true
+      },
+      "cover_timeout": {
+        "description": "封面抓取超时（秒）",
+        "type": "int",
+        "default": 8
+      },
+      "at_sender": {
+        "description": "回复时 @ 发送者",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "emoji_steal": {
+    "type": "object",
+    "description": "偷表情",
+    "hint": "同一张图被群友反复发送就收进表情库",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "expire_sec": {
+        "description": "判定窗口（秒）",
+        "type": "int",
+        "default": 259200,
+        "hint": "默认 3 天；同一张图在这个窗口内被发第二次才收藏"
+      },
+      "size_limit_kb": {
+        "description": "单张大小上限（KB）",
+        "type": "int",
+        "default": 100,
+        "hint": "上游默认 100KB，超过的不下载"
+      },
+      "max_per_group": {
+        "description": "每群最多收藏",
+        "type": "int",
+        "default": 50,
+        "hint": "超出后删最旧的"
+      },
+      "default_reply_rate": {
+        "description": "默认接话概率",
+        "type": "float",
+        "default": 0.1
+      },
+      "default_emoji_rate": {
+        "description": "默认发图概率",
+        "type": "float",
+        "default": 0.2,
+        "hint": "接话命中后，再按这个概率决定发图还是不发"
+      },
+      "group_rates": {
+        "description": "分群覆盖",
+        "type": "dict",
+        "default": {},
+        "items": {},
+        "template_schema": {
+          "reply_rate": {
+            "name": "接话概率",
+            "type": "float",
+            "default": 0.1,
+            "slider": {
+              "min": 0,
+              "max": 1,
+              "step": 0.01
+            }
+          },
+          "emoji_rate": {
+            "name": "发图概率",
+            "type": "float",
+            "default": 0.2,
+            "slider": {
+              "min": 0,
+              "max": 1,
+              "step": 0.01
+            }
+          }
+        },
+        "hint": "键填群号或 UMO"
+      }
+    }
+  },
+  "daily_report": {
+    "type": "object",
+    "description": "日报",
+    "hint": "对齐上游 dailyReport：一言、60 秒读世界、B 站热搜、IT 之家、番剧日历，渲染成一张卡片",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "alapi_token": {
+        "description": "ALAPI Token",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "hint": "上游 alapiToken；留空则用免费的 60s-api。到 https://www.alapi.cn 申请"
+      },
+      "daily_report_full_show": {
+        "description": "显示完整新闻",
+        "type": "bool",
+        "default": true,
+        "hint": "上游 dailyReportFullShow；关掉只显示前 3 条"
+      },
+      "push": {
+        "description": "定时推送",
+        "type": "bool",
+        "default": false
+      },
+      "daily_report_time": {
+        "description": "推送时间（cron）",
+        "type": "string",
+        "default": "0 0 12 * * ?",
+        "hint": "上游 dailyReportTime；Quartz 6 段或 5 段 crontab 都行"
+      },
+      "push_group_list": {
+        "description": "推送群列表",
+        "type": "list",
+        "default": [],
+        "hint": "填群号或完整 UMO"
+      },
+      "pre_handle": {
+        "description": "提前预生成",
+        "type": "bool",
+        "default": false,
+        "hint": "上游 preHandle；在推送前先生成并缓存图片"
+      },
+      "pre_handle_time": {
+        "description": "预生成时间（cron）",
+        "type": "string",
+        "default": "0 0 10 * * ?"
+      }
+    }
+  },
+  "chat_stats": {
+    "type": "object",
+    "description": "群聊统计",
+    "hint": "统计每个群当天的活跃度与热词，可手动 /统计 查看，也可定时推送。这是额外保留的统计能力，不是上游的「日报」",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "push_time": {
+        "description": "推送时间",
+        "type": "string",
+        "default": "23:59",
+        "hint": "24 小时制 HH:MM"
+      },
+      "groups": {
+        "description": "推送目标",
+        "type": "list",
+        "default": [],
+        "hint": "填写群的 UMO；留空则不推送，只能在群里发 /统计 查看"
+      },
+      "top_n": {
+        "description": "榜单人数",
+        "type": "int",
+        "default": 5
+      },
+      "render_mode": {
+        "description": "渲染方式",
+        "type": "string",
+        "default": "text",
+        "options": [
+          "text",
+          "image"
+        ],
+        "hint": "image 需要 Pillow 与可用中文字体"
+      },
+      "font_path": {
+        "description": "字体路径",
+        "type": "string",
+        "default": "",
+        "hint": "render_mode=image 时使用，留空尝试系统默认中文字体"
+      },
+      "retention_days": {
+        "description": "数据保留天数",
+        "type": "int",
+        "default": 90,
+        "hint": "超过天数的消息记录会被清理"
+      }
+    }
+  },
+  "pixiv_push": {
+    "type": "object",
+    "description": "Pixiv 订阅",
+    "hint": "定时抓取 Pixiv 榜单新图并推送到指定群",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "targets": {
+        "description": "推送目标",
+        "type": "list",
+        "default": [],
+        "hint": "填写群的 UMO；留空只缓存不推送"
+      },
+      "check_minutes": {
+        "description": "检查间隔（分钟）",
+        "type": "int",
+        "default": 60,
+        "hint": "Pixiv 有游客限流，不建议低于 30"
+      },
+      "ranking_mode": {
+        "description": "榜单类型",
+        "type": "string",
+        "default": "day",
+        "options": [
+          "day",
+          "week",
+          "month"
+        ],
+        "hint": "日榜 / 周榜 / 月榜"
+      },
+      "max_push_per_run": {
+        "description": "单次推送上限",
+        "type": "int",
+        "default": 2
+      },
+      "max_image_mb": {
+        "description": "图片大小上限（MB）",
+        "type": "float",
+        "default": 8.0,
+        "hint": "超过则压缩，压缩失败只发文字"
+      }
+    }
+  },
+  "help": {
+    "type": "object",
+    "description": "帮助图",
+    "hint": "发送 #帮助 查看本插件全部功能",
+    "items": {
+      "enable": {
+        "description": "启用",
+        "type": "bool",
+        "default": true
+      },
+      "command": {
+        "description": "触发指令",
+        "type": "string",
+        "default": "帮助"
+      },
+      "title_zh": {
+        "description": "中文标题",
+        "type": "string",
+        "default": ""
+      },
+      "title_en": {
+        "description": "英文标题",
+        "type": "string",
+        "default": "JUHKFF-PLUGIN"
+      },
+      "render_image": {
+        "description": "渲染为图片",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后输出纯文本；图片走 AstrBot 的 HTML 渲染"
+      }
+    }
+  }
+}
