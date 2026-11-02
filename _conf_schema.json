@@ -115,7 +115,10 @@
               "prompt": {
                 "description": "人设提示词",
                 "type": "text",
-                "default": ""
+                "default": "",
+                "editor_mode": true,
+                "editor_language": "markdown",
+                "hint": "点右上角全屏按钮可以大窗口编辑"
               }
             }
           }
