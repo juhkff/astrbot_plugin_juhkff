@@ -33,6 +33,7 @@ from .common import (
     fetch_bytes,
     fetch_json,
     load_json,
+    resolve_umo,
     save_json,
     subdir,
     truncate,
@@ -250,7 +251,9 @@ class PixivPushModule(BaseModule):
             return
         for item in items:
             chain = await self._compose(item)
-            for umo in targets:
+            for target in targets:
+                # targets 可能存完整 umo，也可能只是群号：统一交给 resolve_umo
+                umo = resolve_umo(self.plugin.context, target)
                 try:
                     await self.plugin.context.send_message(umo, chain)
                     await asyncio.sleep(1.5)

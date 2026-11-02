@@ -76,7 +76,8 @@
                 "description": "群号列表",
                 "type": "list",
                 "default": [],
-                "hint": "填群号（UMO 里第三段）"
+                "hint": "点开右侧图标可按群名搜索选择（保存完整 UMO）；也可手填群号或 UMO",
+                "_special": "umo"
               },
               "chat_rate": {
                 "description": "接话概率",
@@ -278,32 +279,43 @@
       },
       "group_rates": {
         "description": "分群覆盖",
-        "type": "dict",
-        "default": {},
-        "items": {},
-        "template_schema": {
-          "reply_rate": {
-            "name": "接话概率",
-            "type": "float",
-            "default": 0.1,
-            "slider": {
-              "min": 0,
-              "max": 1,
-              "step": 0.01
-            }
-          },
-          "emoji_rate": {
-            "name": "发图概率",
-            "type": "float",
-            "default": 0.2,
-            "slider": {
-              "min": 0,
-              "max": 1,
-              "step": 0.01
+        "type": "template_list",
+        "default": [],
+        "hint": "按群覆盖接话/发图概率，命中第一条生效；群用右侧选择器挑选",
+        "templates": {
+          "rule": {
+            "name": "分群规则",
+            "items": {
+              "groups": {
+                "description": "群",
+                "type": "list",
+                "default": [],
+                "_special": "umo",
+                "hint": "支持多选；也兼容手填群号"
+              },
+              "reply_rate": {
+                "name": "接话概率",
+                "type": "float",
+                "default": 0.1,
+                "slider": {
+                  "min": 0,
+                  "max": 1,
+                  "step": 0.01
+                }
+              },
+              "emoji_rate": {
+                "name": "发图概率",
+                "type": "float",
+                "default": 0.2,
+                "slider": {
+                  "min": 0,
+                  "max": 1,
+                  "step": 0.01
+                }
+              }
             }
           }
-        },
-        "hint": "键填群号或 UMO"
+        }
       }
     }
   },
@@ -345,7 +357,8 @@
         "description": "推送群列表",
         "type": "list",
         "default": [],
-        "hint": "填群号或完整 UMO"
+        "hint": "从会话列表选群；留空只响应命令不推送",
+        "_special": "umo"
       },
       "pre_handle": {
         "description": "提前预生成",
@@ -374,7 +387,8 @@
         "description": "推送目标",
         "type": "list",
         "default": [],
-        "hint": "填写群的 UMO；留空只缓存不推送"
+        "hint": "从会话列表选群；留空只缓存不推送",
+        "_special": "umo"
       },
       "check_minutes": {
         "description": "检查间隔（分钟）",
