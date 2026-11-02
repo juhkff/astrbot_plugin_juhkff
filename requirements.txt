@@ -1,6 +1,8 @@
 # 核心 HTTP 由 AstrBot 自带 aiohttp 提供，无需重复声明
 # 日报图片渲染
 pillow>=10.0.0
+# 日报/帮助图的本地渲染（装完还要 playwright install chromium）
+playwright>=1.40.0
 
 # 可选：Pixiv 的 app 后端（backend=app 时才需要）
 # 不装也能用 backend=web（纯 aiohttp + PHPSESSID）

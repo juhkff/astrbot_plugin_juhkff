@@ -121,6 +121,17 @@ class HelpGenModule(BaseModule):
             "version": version,
             "sections": sections,
         }
+        # 优先本机 Chromium（快且不出机器）；没有 playwright 时退回远端 t2i
+        from .renderer import LocalHtmlRenderer, render_template
+
+        if LocalHtmlRenderer.available():
+            png = await render_template(_HTML, data, scale=2)  # 720px 模板，2 倍足够清晰
+            if png:
+                target = data_dir() / "help"
+                target.mkdir(parents=True, exist_ok=True)
+                file_path = target / f"help_{int(time.time())}.png"
+                file_path.write_bytes(png)
+                return event.image_result(str(file_path))
         try:
             renderer = self.plugin.context.html_renderer
             path = await renderer.render_custom_template(

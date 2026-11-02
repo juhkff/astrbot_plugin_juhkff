@@ -144,6 +144,13 @@ class JuhkffPlugin(Star):
             except Exception:
                 logger.exception(f"[juhkff] 模块 {mod.key} 停止时出错")
         await self.scheduler.shutdown()
+        # 本地渲染器会常驻一个 Chromium 进程，卸载时一起关掉
+        try:
+            from .juhkff_modules.renderer import renderer as html_renderer
+
+            await html_renderer.close()
+        except Exception:
+            logger.exception("[juhkff] 关闭本地渲染器失败")
         logger.info("[juhkff] 已卸载")
 
     # ------------------------------------------------------------ 消息分发

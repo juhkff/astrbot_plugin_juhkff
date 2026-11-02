@@ -10,8 +10,9 @@
 - 摸鱼日历（距离下个节日/周末还有几天）；
 - 日期与星期。
 
-用 AstrBot 的 HTML 渲染器出图（Jinja2 模板）：`#日报` 随时生成；开启 `push`
-后按 `push_hour`/`push_minute` 定时推送，`pre_handle` 可提前生成缓存。
+出图默认用**本机 Chromium**（playwright，参数对齐上游 puppeteer：578×5 倍），
+`renderer` 可切回远端 t2i 服务。`#日报` 随时生成；开启 `push` 后按
+`push_hour`/`push_minute` 定时推送，`pre_handle` 可提前生成缓存。
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from .common import (
     save_temp_image,
     truncate,
 )
+from .renderer import render_template
 
 HITOKOTO_URL = "https://v1.hitokoto.cn/?c=a"
 ALAPI_URL = "https://v2.alapi.cn/api/zaobao"
@@ -356,11 +358,25 @@ class DailyReportModule(BaseModule):
         }
 
     async def _render(self, data: dict[str, Any]) -> Path | None:
-        """用 AstrBot 的 HTML 渲染器出 PNG。
+        """渲染日报图：默认本机 Chromium，`renderer=remote` 时走远端 t2i。
 
-        渲染器可能返回 bytes、临时文件路径或 http URL，三种都要兼容；
-        任何一步失败都返回 None，让调用方退回纯文本日报。
+        任一环节失败都返回 None，让调用方退回纯文本日报。
         """
+        payload = self._template_data(data)
+        if str(self.cfg.get("renderer") or "local") == "local":
+            png = await render_template(_load_html(), payload)
+            if not png:
+                logger.warning("[juhkff] 日报：本机渲染不可用，改用纯文本")
+                return None
+            try:
+                return Path(save_temp_image(png, ".png"))
+            except Exception:
+                logger.exception("[juhkff] 日报：保存图片失败")
+                return None
+        return await self._render_remote(payload)
+
+    async def _render_remote(self, payload: dict[str, Any]) -> Path | None:
+        """远端 t2i 服务：返回可能是 bytes、本地路径或图片 URL，都要兼容。"""
         try:
             renderer = self.plugin.context.html_renderer
         except AttributeError:
@@ -369,7 +385,7 @@ class DailyReportModule(BaseModule):
             result = await asyncio.wait_for(
                 renderer.render_custom_template(
                     _load_html(),
-                    self._template_data(data),
+                    payload,
                     return_url=False,
                     options={"type": "png", "quality": 95, "full_page": True},
                 ),
@@ -474,9 +490,9 @@ def _load_html() -> str:
     css = re.sub(r"@font-face\s*\{[^}]*\}", lambda m: _face(m.group(0)), css)
     css += (
         '\nbody, .wrapper { font-family: "Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Zen Hei", sans-serif; }\n'
-        # 模板按 578px 设计，而渲染端视口固定 800px：让卡片水平居中，避免右侧留一条白边
-        "html, body { width: 100%; margin: 0; padding: 0; background: #fff; }\n"
-        "body { display: flex; justify-content: center; }\n"
+        # 卡片天然 608px 宽（wrapper 578 + 左右 padding 15），视口与之对齐即可；
+        # 不能用 flex 居中：flex 子项会被拉到视口高度，截图底部会多出一大片空白
+        "html, body { margin: 0; padding: 0; background: #fff; }\n"
     )
     html = html.replace(
         '<link rel="stylesheet" href="main.css" />', f"<style>{css}</style>"
