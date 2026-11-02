@@ -312,6 +312,13 @@ class ActiveChatModule(BaseModule):
         }
         if image_refs:
             entry["images"] = image_refs
+        # 提取模式：正文只抓一次，抓到了就跟着这条消息一起进历史，
+        # 后面几轮聊到同一个链接时不用重抓，也能接着上下文说话
+        link_text = ""
+        if self._url_mode() == "extract":
+            link_text = await self._analyze_urls(text)
+            if link_text and bool(self.cfg.get("link_in_history", True)):
+                entry["link"] = link_text
         await self._append(umo, entry)
 
         # 掷骰子决定这次要不要接话；不接就静默返回，等后续消息
@@ -322,7 +329,7 @@ class ActiveChatModule(BaseModule):
         # 的群消息都被白白下载一遍
         current_images = await self._reply_image_urls(images) if images else []
         line = await self._generate(
-            umo, text, sender, called, event, current_images, history
+            umo, text, sender, called, event, current_images, history, link_text
         )
         if not line:
             # 已经掷到「要回」但生成失败（没配模型/请求报错）：结束事件，
@@ -565,6 +572,11 @@ class ActiveChatModule(BaseModule):
                 )
                 continue
             stamp = self._format_ts(item.get("ts"))
+            # 提取模式下存下来的链接正文，按「先说正文、再说这句话」的顺序还原，
+            # 让人和消息本体保持一一对应
+            link = str(item.get("link") or "")
+            if link:
+                contexts.append(UserMessageSegment(content=[TextPart(text=link)]))
             head = f"{stamp} {item.get('name')}：{text}" if stamp else f"{item.get('name')}：{text}"
             parts: list[Any] = [TextPart(text=head)]
             # 历史图跟在文字后面，顺序与发送时一致；模型支持图片时能看到它们
@@ -618,6 +630,7 @@ class ActiveChatModule(BaseModule):
         event: AstrMessageEvent,
         image_refs: list[str],
         history: list[dict[str, Any]],
+        link_text: str = "",
     ) -> str | None:
         contexts = self._build_contexts(history)
         # 本回合消息里带图就直接交给模型看（主流模型都支持多模态）；
@@ -628,17 +641,14 @@ class ActiveChatModule(BaseModule):
             sender, latest, called, len(image_urls), at_me=self._at_me(event)
         )
         url_mode = self._url_mode()
-        url_extra = ""
         link_contexts: list[Message] = []
         tools: ToolSet | None = None
-        if url_mode == "extract":
-            url_extra = await self._analyze_urls(latest)
-            if url_extra:
-                # 链接正文单独作为一条参考消息插入历史之后，不拼进用户这句话里：
-                # 既不会把群友的原话冲淡，也方便在这一段前后加边界说明。
-                link_contexts = [
-                    UserMessageSegment(content=[TextPart(text=url_extra)])
-                ]
+        if url_mode == "extract" and link_text:
+            # 链接正文单独作为一条参考消息插入历史之后，不拼进用户这句话里：
+            # 既不会把群友的原话冲淡，也方便在这一段前后加边界说明。
+            link_contexts = [
+                UserMessageSegment(content=[TextPart(text=link_text)])
+            ]
         elif url_mode == "model":
             # 不预读正文，只把「读网页」做成工具；模型判断需要时才调用
             tools = self._url_toolset()
@@ -652,7 +662,7 @@ class ActiveChatModule(BaseModule):
                 f"--- system ---\n{system_prompt}\n"
                 f"--- user ---\n{user_message}\n"
                 f"--- 历史 {len(contexts)} 条，附图 {len(image_urls)} 张，"
-                f"链接正文 {len(url_extra)} 字，链接模式 {url_mode} ---"
+                f"链接正文 {len(link_text)} 字，链接模式 {url_mode} ---"
             )
 
         # 模型一律走 AstrBot 里配置的对话 provider：没指定就用当前会话的，
