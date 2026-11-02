@@ -300,6 +300,12 @@
           "step": 0.01
         }
       },
+      "gallery_path": {
+        "description": "本地表情包文件夹",
+        "type": "string",
+        "default": "",
+        "hint": "把表情包（png/jpg/gif/webp）放进这个文件夹，机器人会随机发；相对路径从插件数据目录算起，也可填绝对路径；留空则不启用。文件夹里的增删会在 60 秒内生效"
+      },
       "group_rates": {
         "description": "按群覆盖概率",
         "type": "template_list",

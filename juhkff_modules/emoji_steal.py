@@ -31,6 +31,8 @@ from astrbot.api.message_components import Image
 
 from .common import BaseModule, PluginLike, data_dir, load_json, save_json, subdir
 
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
 # 「是不是表情包」的判断提示词：要求模型只回一个「是」或「否」
 _JUDGE_PROMPT = "这张图片是不是表情包（贴纸 / sticker，用于聊天中表达语气或玩梗）？只回答「是」或「否」，不要加标点或解释。"
 
@@ -66,6 +68,9 @@ class EmojiStealModule(BaseModule):
         self._prints: dict[str, dict[str, dict[str, float]]] = {}
         self._lock = asyncio.Lock()
         self._rng = random.SystemRandom()
+        # 本地表情包文件夹的扫描缓存
+        self._gallery: list[Path] | None = None
+        self._gallery_at = 0.0
 
     def help_entries(self):
         return [("（自动）", "同一张图被反复发送时自动收藏，并按配置概率随机发出")]
@@ -163,15 +168,22 @@ class EmojiStealModule(BaseModule):
         except Exception:
             logger.exception("[juhkff] 偷表情：收藏失败")
 
-        # 先掷「要不要说话」，再掷「说表情还是不说话」，和上游一致
+        # 先掷「要不要说话」，再掷「发不发偷到的图」；和上游一致：
+        # 偷到的图没命中或本群还没有收藏时，回落到本地表情包文件夹
         if self._rng.random() >= reply_rate:
             return None
-        files = self._gallery_files(group_key)
-        if not files or self._rng.random() >= emoji_rate:
-            return None
+        path: Path | None = None
+        source = ""
+        stolen = self._gallery_files(group_key)
+        if stolen and self._rng.random() < emoji_rate:
+            path, source = self._rng.choice(stolen), "偷到的表情"
+        if path is None:
+            local = self._local_gallery()
+            if not local:
+                return None
+            path, source = self._rng.choice(local), "本地图库的表情"
         await asyncio.sleep(self._rng.uniform(0.0, 1.5))
-        path = self._rng.choice(files)
-        logger.info(f"[juhkff] 发送偷到的表情：{path}")
+        logger.info(f"[juhkff] 发送{source}：{path}")
         return MessageChain().file_image(str(path))
 
     @staticmethod
@@ -187,6 +199,35 @@ class EmojiStealModule(BaseModule):
 
     def _gallery_dir(self, group_key: str) -> Path:
         return (self._root or data_dir() / "emoji") / group_key
+
+    def _local_gallery(self) -> list[Path]:
+        """扫描配置里的本地表情包文件夹（60 秒缓存，方便随时往里丢图）。
+
+        路径可以是绝对路径；相对路径以插件数据目录为基准。没有该文件夹时
+        会自动创建，省得用户先手动建。
+        """
+        raw = str(self.cfg.get("gallery_path") or "").strip()
+        if not raw:
+            return []
+        now = time.time()
+        if self._gallery is not None and now - self._gallery_at < 60:
+            return self._gallery
+        base = Path(raw) if Path(raw).is_absolute() else data_dir() / raw
+        files: list[Path] = []
+        if base.is_dir():
+            files = [
+                p
+                for p in base.rglob("*")
+                if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+            ]
+        else:
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                logger.warning(f"[juhkff] 本地表情包目录建不出来：{base}")
+        self._gallery = files
+        self._gallery_at = now
+        return files
 
     def _gallery_files(self, group_key: str) -> list[Path]:
         index = self._index.get(group_key) or {}

@@ -80,6 +80,10 @@ data/plugin_data/astrbot_plugin_juhkff/
   可选的「启用表情包判断」会在每张图第一次出现时交给模型判断（`judge_provider`
   留空则用当前会话模型），判为「否」就不计数并清掉旧计数；模型报错时按未判断处理，
   不阻塞收藏。
+  「本地表情包文件夹」（`gallery_path`）对齐上游 `emojiGalleryPath`：把现成的表情包
+  （png/jpg/gif/webp）丢进这个目录，机器人就会随机发；本群还没有偷到图、或者
+  `default_emoji_rate` 这次没掷中时都回落到它，所以从零开始也有表情可用。相对路径
+  从插件数据目录算起，目录不存在会自动创建，增删在 60 秒内生效。
 - **日报**：对齐上游 `dailyReport.ts`——`v1.hitokoto.cn` 一言、alapi 或
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
   `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数，用 Jinja2 模板交给
