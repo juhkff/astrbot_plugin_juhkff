@@ -98,45 +98,6 @@
           }
         }
       },
-      "chat_prompts": {
-        "description": "接话人设（role=system 提示词）",
-        "type": "template_list",
-        "hint": "就是发给模型的 system 内容，改完保存即生效；可用 {{botName}} 占位机器人昵称",
-        "templates": {
-          "prompt": {
-            "name": "人设",
-            "display_item": "name",
-            "items": {
-              "name": {
-                "description": "人设名称",
-                "type": "string",
-                "default": "普通群友"
-              },
-              "prompt": {
-                "description": "人设提示词",
-                "type": "text",
-                "default": "",
-                "editor_mode": true,
-                "editor_language": "markdown",
-                "hint": "点右上角全屏按钮可以大窗口编辑"
-              }
-            }
-          }
-        },
-        "default": [
-          {
-            "__template_key": "prompt",
-            "name": "默认",
-            "prompt": "你在一个QQ群聊里，扮演一名普通群员参与聊天。\n只输出一条要发到群里的消息：不要用括号写动作或旁白，不要换行，不要以「回复xx」开头，句尾不加标点；不要解释思路，也不要带日期和昵称。\n你在群里的昵称是{{botName}}。\n\n请像普通群员那样接着最新这条说一句话，只输出要发的内容本身。\n更早的消息只是聊天背景：不要回复它们，不要续写它们，也不要复述里面的「当时」之类标记。"
-          }
-        ]
-      },
-      "chat_prompt_apply": {
-        "description": "生效人设",
-        "type": "string",
-        "default": "默认",
-        "hint": "填 chat_prompts 里的名字；留空用第一条（上游默认值为「默认」）"
-      },
       "use_context": {
         "description": "携带聊天上下文",
         "type": "bool",
@@ -182,6 +143,14 @@
         "type": "bool",
         "default": false,
         "hint": "上游 attachUrlAnalysis；先抓消息里链接的正文再让模型接话"
+      },
+      "persona_prompt": {
+        "description": "人设提示词（role=system 的内容）",
+        "type": "text",
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "default": "你在一个QQ群聊里，扮演一名普通群员参与聊天。\n只输出一条要发到群里的消息：不要用括号写动作或旁白，不要换行，不要以「回复xx」开头，句尾不加标点；不要解释思路，也不要带日期和昵称。\n你在群里的昵称是{{botName}}。\n\n请像普通群员那样接着最新这条说一句话，只输出要发的内容本身。\n更早的消息只是聊天背景：不要回复它们，不要续写它们，也不要复述里面的「当时」之类标记。",
+        "hint": "直接发给模型的 system 内容，改完保存即生效；可用 {{botName}} 占位机器人昵称；点编辑器右上角按钮可全屏编辑"
       }
     }
   },

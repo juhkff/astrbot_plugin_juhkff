@@ -92,7 +92,7 @@ data/plugin_data/astrbot_plugin_juhkff/
   消息数；`group_chat_rate` 按群覆盖概率与「被叫必回」；以唤醒前缀（AstrBot 全局
   `wake_prefix`，默认 `/`）开头的消息、以及 `@全体` 这类「被唤醒但不是在叫它」的消息
   按指令处理，不记录也不回复，避免和 `/juhkff`、`#帮助` 抢；`use_context + max_history_length` 决定带多少条上下文；
-  `chat_prompts + chat_prompt_apply` 选人设（支持 `{{botName}}`）；`attach_url_analysis`
+  `persona_prompt` 就是人设（system 内容，支持 `{{botName}}`；配置页里点编辑器右上角可全屏编辑）；`attach_url_analysis`
   会先抓消息里链接的正文；图片两头都带：
   - 当前回合的图经 `image_urls` 直接给多模态模型看；
   - 历史里的图以 `ImageURLPart` 跟着 `contexts` 一起传（只存 http(s) 地址，不落
@@ -110,7 +110,7 @@ data/plugin_data/astrbot_plugin_juhkff/
     后续回合能看出这条是在叫自己；本回合这条 user 消息的首行同样写明
     `（这条是在@你…）` / `（这条是在引用回复你…）`。「只接着最新这条说、
     不要回复历史」属于行为约束，直接写在人设（system）里——默认人设已带，
-    改 `chat_prompts` 时别把这段删掉。
+    改 `persona_prompt` 时别把这段删掉。
   - 正文里用和历史上同一套 `[图片1] [图片2]` 占位（`小明：在吗 [图片1]`），
     不额外加说明段落。模型统一走 AstrBot 里配置的对话 provider：
     `provider` 留空就用当前会话的对话模型，不再由插件自己管理 Key / 模型名 /

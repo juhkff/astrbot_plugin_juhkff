@@ -486,19 +486,8 @@ class ActiveChatModule(BaseModule):
     # ------------------------------------------------------------ 生成
 
     async def _system_prompt(self, event: AstrMessageEvent) -> str:
-        """选出人设提示词，并把 {{botName}} 换成机器人在群里的昵称（拿不到用 QQ 号）。"""
-        prompts = self.cfg.get("chat_prompts") or []
-        selected = None
-        apply_name = str(self.cfg.get("chat_prompt_apply") or "").strip()
-        for item in prompts:
-            if not isinstance(item, dict):
-                continue
-            if apply_name and item.get("name") == apply_name:
-                selected = item
-                break
-        if selected is None and prompts and isinstance(prompts[0], dict):
-            selected = prompts[0]
-        text = str((selected or {}).get("prompt") or DEFAULT_PROMPT)
+        """取人设提示词，并把 {{botName}} 换成机器人在群里的昵称（拿不到用 QQ 号）。"""
+        text = str(self.cfg.get("persona_prompt") or DEFAULT_PROMPT)
 
         bot_name = await self._bot_name(event)
         # 行为约束（只回最新一条等）直接写在人设里，由配置决定，代码不再额外拼接
