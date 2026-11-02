@@ -8,26 +8,26 @@
         "description": "总开关",
         "type": "bool",
         "default": true,
-        "hint": "关闭后本插件所有功能都不工作"
+        "hint": "关掉后这个插件的所有功能都停用"
       },
       "debug": {
         "description": "详细日志",
         "type": "bool",
         "default": false,
-        "hint": "打开后各模块的明细用 INFO 输出（Redis、链接抓取失败原因、模型能力判断等），主动群聊还会打印每次请求的 system、user 消息与历史条数；内容含聊天原文",
+        "hint": "打开后会把内部细节写进日志（连接情况、抓取失败原因等），主动群聊还会打印每次发给模型的内容，含聊天原文，排查完记得关",
         "obvious_hint": true
       },
       "proxy": {
-        "description": "HTTP 代理",
+        "description": "网络代理",
         "type": "string",
         "default": "",
-        "hint": "支持 http:// 与 socks5://；留空则直连（抓网页/图片时用）"
+        "hint": "形如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；留空表示直连（抓网页和图片时用）"
       },
       "timezone": {
         "description": "时区",
         "type": "string",
         "default": "Asia/Shanghai",
-        "hint": "IANA 时区名，如 Asia/Shanghai、UTC；写错会退回系统本地时区"
+        "hint": "例如 Asia/Shanghai（北京时间）、UTC；填错会按服务器本地时区算"
       }
     }
   },
@@ -42,11 +42,11 @@
         "default": false
       },
       "provider": {
-        "description": "AstrBot 对话模型",
+        "description": "对话模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "留空则用当前会话绑定的对话模型；都没有时取 AstrBot 里第一个可用的对话模型"
+        "hint": "留空就用这个群当前绑定的对话模型；群没绑定时用 AstrBot 里第一个可用的对话模型"
       },
       "default_chat_rate": {
         "description": "默认接话概率",
@@ -57,27 +57,27 @@
           "max": 1,
           "step": 0.05
         },
-        "hint": "上游 defaultChatRate；没被叫到时按这个概率掷骰子"
+        "hint": "没被 @ 也没被引用时，按这个概率决定要不要接话"
       },
       "default_reply_at_bot": {
-        "description": "被 @ / 引用回复时必定回复",
+        "description": "被 @ 或引用时必回",
         "type": "bool",
         "default": true,
-        "hint": "上游 defaultReplyAtBot；唤醒前缀消息（如 /juhkff）不算在内"
+        "hint": "以 / 或 # 开头的指令消息不算在内，不会被当成在叫它"
       },
       "group_chat_rate": {
-        "description": "分群概率覆盖",
+        "description": "按群覆盖概率",
         "type": "template_list",
-        "hint": "上游 groupChatRate；群号命中后覆盖默认概率与 @ 行为",
+        "hint": "这里列出的群用下面的概率，没列出的群用默认值",
         "templates": {
           "rule": {
-            "name": "分群规则",
+            "name": "分群设置",
             "items": {
               "group_list": {
-                "description": "群号列表",
+                "description": "群",
                 "type": "list",
                 "default": [],
-                "hint": "点开右侧图标可按群名搜索选择（保存完整 UMO）；也可手填群号或 UMO",
+                "hint": "点右侧图标搜索群名选择（可多选）；也可以直接填群号",
                 "_special": "umo"
               },
               "chat_rate": {
@@ -91,7 +91,7 @@
                 }
               },
               "reply_at_bot": {
-                "description": "被 @ / 引用回复时必定回复",
+                "description": "被 @ 或引用时必回",
                 "type": "bool",
                 "default": true
               }
@@ -117,7 +117,7 @@
         }
       },
       "history_ttl_hours": {
-        "description": "历史过期时间（小时）",
+        "description": "历史保留时长（小时）",
         "type": "int",
         "default": 12,
         "slider": {
@@ -125,19 +125,19 @@
           "max": 168,
           "step": 1
         },
-        "hint": "0 表示不过期；默认 12 小时，对齐上游 EX 12*60*60：最后一条消息之后过这么久整段历史自动消失"
+        "hint": "最后一条消息之后过这么久，整段历史自动清掉；0 = 一直保留"
       },
       "redis_url": {
-        "description": "Redis 地址",
+        "description": "历史存储（Redis 地址）",
         "type": "string",
         "default": "redis://127.0.0.1:6379/0",
-        "hint": "密码写成 redis://:密码@127.0.0.1:6379/0；连不上会自动退化为不存历史"
+        "hint": "留空或连不上就没有跨重启的上下文；有密码时写成 redis://:密码@127.0.0.1:6379/0"
       },
       "redis_key_prefix": {
-        "description": "Redis Key 前缀",
+        "description": "数据前缀",
         "type": "string",
         "default": "juhkff:active_chat",
-        "hint": "实际的 key 是「前缀:会话UMO」，多个机器人共用同一个 Redis 时用来隔离"
+        "hint": "多个机器人共用同一个 Redis 时用不同前缀隔开，一般不用改"
       },
       "clear_history_on_start": {
         "description": "启动时清空历史聊天数据",
@@ -146,18 +146,18 @@
         "hint": "重启机器人时清空历史（WebUI 里保存配置触发的热重载不会清）；关掉则重启后继续用旧上下文"
       },
       "attach_url_analysis": {
-        "description": "附带链接分析",
+        "description": "附带链接内容",
         "type": "bool",
         "default": false,
-        "hint": "上游 attachUrlAnalysis；先抓消息里链接的正文再让模型接话"
+        "hint": "先抓消息里链接的正文，再让模型接话"
       },
       "persona_prompt": {
-        "description": "人设提示词（role=system 的内容）",
+        "description": "人设提示词",
         "type": "text",
         "editor_mode": true,
         "editor_language": "markdown",
         "default": "你在一个QQ群聊里，扮演一名普通群员参与聊天。\n只输出一条要发到群里的消息：不要用括号写动作或旁白，不要换行，不要以「回复xx」开头，句尾不加标点；不要解释思路，也不要带日期和昵称。\n你在群里的昵称是{{botName}}。\n\n请像普通群员那样接着最新这条说一句话，只输出要发的内容本身。\n更早的消息只是聊天背景：不要回复它们，不要续写它们，也不要复述里面的「当时」之类标记。",
-        "hint": "直接发给模型的 system 内容，改完保存即生效；可用 {{botName}} 占位机器人昵称；点编辑器右上角按钮可全屏编辑"
+        "hint": "发给模型的设定，改完保存即生效；可用 {{botName}} 代表机器人昵称；点右上角按钮可全屏编辑"
       }
     }
   },
@@ -207,7 +207,8 @@
       "at_sender": {
         "description": "回复时 @ 发送者",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "解析结果里带一下是谁发的"
       }
     }
   },
@@ -264,7 +265,8 @@
           "min": 0,
           "max": 1,
           "step": 0.01
-        }
+        },
+        "hint": "收到群消息时，按这个概率决定要不要接话"
       },
       "default_emoji_rate": {
         "description": "默认发图概率",
@@ -278,20 +280,20 @@
         }
       },
       "group_rates": {
-        "description": "分群覆盖",
+        "description": "按群覆盖概率",
         "type": "template_list",
         "default": [],
-        "hint": "按群覆盖接话/发图概率，命中第一条生效；群用右侧选择器挑选",
+        "hint": "这里列出的群用下面的概率，没列出的群用默认值",
         "templates": {
           "rule": {
-            "name": "分群规则",
+            "name": "分群设置",
             "items": {
               "groups": {
                 "description": "群",
                 "type": "list",
                 "default": [],
                 "_special": "umo",
-                "hint": "支持多选；也兼容手填群号"
+                "hint": "点右侧图标搜索群名选择（可多选）；也可以直接填群号"
               },
               "reply_rate": {
                 "name": "接话概率",
@@ -301,7 +303,8 @@
                   "min": 0,
                   "max": 1,
                   "step": 0.01
-                }
+                },
+                "description": "接话概率"
               },
               "emoji_rate": {
                 "name": "发图概率",
@@ -311,7 +314,8 @@
                   "min": 0,
                   "max": 1,
                   "step": 0.01
-                }
+                },
+                "description": "发图概率"
               }
             }
           }
@@ -341,38 +345,39 @@
         "default": false
       },
       "alapi_token": {
-        "description": "ALAPI Token",
+        "description": "ALAPI 令牌",
         "type": "string",
         "default": "",
         "secret": true,
-        "hint": "上游 alapiToken；留空则用免费的 60s-api。到 https://www.alapi.cn 申请"
+        "hint": "用于抓「60 秒读世界」；留空就用免费的公开接口。到 alapi.cn 注册可申请"
       },
       "daily_report_full_show": {
-        "description": "显示完整新闻",
+        "description": "显示完整新闻列表",
         "type": "bool",
         "default": true,
-        "hint": "上游 dailyReportFullShow；关掉只显示前 3 条"
+        "hint": "关掉只显示前 3 条"
       },
       "push": {
-        "description": "定时推送",
+        "description": "定时自动推送",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "打开后每天在下面设的时间推送到群"
       },
       "push_group_list": {
-        "description": "推送群列表",
+        "description": "推送群",
         "type": "list",
         "default": [],
-        "hint": "从会话列表选群；留空只响应命令不推送",
+        "hint": "从已有群聊里选，可多选；留空则只响应 #日报、不自动推送",
         "_special": "umo"
       },
       "pre_handle": {
-        "description": "提前预生成",
+        "description": "提前生成",
         "type": "bool",
         "default": false,
-        "hint": "上游 preHandle；在推送前先生成并缓存图片"
+        "hint": "推送前先生成好图片并缓存，推送时直接发"
       },
       "push_hour": {
-        "description": "推送时间-时",
+        "description": "推送时间（时）",
         "type": "int",
         "default": 12,
         "slider": {
@@ -380,10 +385,10 @@
           "max": 23,
           "step": 1
         },
-        "hint": "按 global.timezone 计算，下同"
+        "hint": "每天几点推送，按上面的时区算"
       },
       "push_minute": {
-        "description": "推送时间-分",
+        "description": "推送时间（分）",
         "type": "int",
         "default": 0,
         "slider": {
@@ -393,17 +398,18 @@
         }
       },
       "pre_handle_hour": {
-        "description": "提前生成-时",
+        "description": "提前生成（时）",
         "type": "int",
         "default": 10,
         "slider": {
           "min": 0,
           "max": 23,
           "step": 1
-        }
+        },
+        "hint": "提前生成开始的时间，一般比推送早 1~2 小时"
       },
       "pre_handle_minute": {
-        "description": "提前生成-分",
+        "description": "提前生成（分）",
         "type": "int",
         "default": 0,
         "slider": {
@@ -425,10 +431,10 @@
         "default": false
       },
       "targets": {
-        "description": "推送目标",
+        "description": "推送群",
         "type": "list",
         "default": [],
-        "hint": "从会话列表选群；留空只缓存不推送",
+        "hint": "从已有群聊里选；留空则只记录、不推送",
         "_special": "umo"
       },
       "check_minutes": {
@@ -443,7 +449,7 @@
         }
       },
       "ranking_mode": {
-        "description": "榜单类型",
+        "description": "榜单",
         "type": "string",
         "default": "day",
         "options": [
@@ -459,7 +465,7 @@
         ]
       },
       "max_push_per_run": {
-        "description": "单次推送上限",
+        "description": "单次最多推送几个作品",
         "type": "int",
         "default": 2,
         "slider": {
@@ -498,12 +504,13 @@
         "hint": "触发词本身，不要带前缀；默认「帮助」= 群里发 #帮助 或 /帮助"
       },
       "title_zh": {
-        "description": "中文标题",
+        "description": "图片中文标题",
         "type": "string",
-        "default": ""
+        "default": "",
+        "hint": "留空则用触发词（帮助）"
       },
       "title_en": {
-        "description": "英文标题",
+        "description": "图片英文标题",
         "type": "string",
         "default": "JUHKFF-PLUGIN"
       },
