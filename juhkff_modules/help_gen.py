@@ -1,7 +1,7 @@
 """帮助图模块：移植自上游 `src/apps/helpGen.ts`。
 
 发送 `#帮助` 时，把插件里所有已启用的功能整理成一张 HTML 卡片，
-复用 AstrBot 的 `context.html_renderer` 出图（失败则退回纯文本列表）。
+用本机 Chromium 出图（参数 2 倍缩放，720px 模板足够清晰）；渲染失败直接报错。
 
 上游会把 Yunzai 各插件的 help 声明收集起来渲染，这里改成从本插件
 各模块的 `help_entries()` 收集，结构一致、内容更可控。
@@ -15,7 +15,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 
-from .common import BaseModule, PluginLike, data_dir, download_image_bytes, message_text
+from .common import BaseModule, PluginLike, data_dir, message_text
 
 _HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -103,7 +103,7 @@ class HelpGenModule(BaseModule):
         return "\n".join(lines)
 
     async def _reply(self, event: AstrMessageEvent):
-        """渲染帮助图；任何一步失败都退回纯文本，保证功能可用。"""
+        """渲染帮助图；失败就直接报错，不退回文字（render_image=false 时除外）。"""
         sections = self._sections()
         if not sections:
             return event.plain_result("没有已启用的功能。")
@@ -121,47 +121,20 @@ class HelpGenModule(BaseModule):
             "version": version,
             "sections": sections,
         }
-        # 优先本机 Chromium（快且不出机器）；没有 playwright 时退回远端 t2i
-        from .renderer import LocalHtmlRenderer, render_template
+        from .renderer import render_template
 
-        if LocalHtmlRenderer.available():
-            png = await render_template(_HTML, data, scale=2)  # 720px 模板，2 倍足够清晰
-            if png:
-                target = data_dir() / "help"
-                target.mkdir(parents=True, exist_ok=True)
-                file_path = target / f"help_{int(time.time())}.png"
-                file_path.write_bytes(png)
-                return event.image_result(str(file_path))
-        try:
-            renderer = self.plugin.context.html_renderer
-            path = await renderer.render_custom_template(
-                _HTML,
-                data,
-                return_url=False,
-                options={"type": "png", "quality": 95, "full_page": True},
+        png = await render_template(_HTML, data, scale=2)  # 720px 模板，2 倍足够清晰
+        if not png:
+            logger.error("[juhkff] 帮助图渲染失败")
+            return event.plain_result(
+                "帮助图生成失败，详细原因看 AstrBot 日志（[juhkff] 开头）"
             )
-        except Exception:
-            logger.exception("[juhkff] 帮助图渲染失败，改用文本")
-            return event.plain_result(self._text())
 
-        path = str(path or "")
-        if not path:
-            return event.plain_result(self._text())
-        # 渲染器可能返回 URL（图片服务托管）而不是本地路径，先下载再发
-        if path.startswith(("http://", "https://")):
-            try:
-                payload = await download_image_bytes(
-                    path, proxy=self.proxy or None, timeout=30.0
-                )
-            except Exception:
-                logger.exception("[juhkff] 帮助图下载失败，改用文本")
-                return event.plain_result(self._text())
-            target = data_dir() / "help"
-            target.mkdir(parents=True, exist_ok=True)
-            file_path = target / f"help_{int(time.time())}.png"
-            file_path.write_bytes(payload)
-            path = str(file_path)
+        target = data_dir() / "help"
+        target.mkdir(parents=True, exist_ok=True)
+        file_path = target / f"help_{int(time.time())}.png"
+        file_path.write_bytes(png)
 
         # 注意：模板里访问 dict 的 items 必须写 section['items']，
         # 写成 section.items 会命中 dict.items 方法
-        return MessageChain().file_image(path).message("这是本插件的全部功能～")
+        return MessageChain().file_image(str(file_path)).message("这是本插件的全部功能～")

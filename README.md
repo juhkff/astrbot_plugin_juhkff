@@ -39,7 +39,7 @@ cp -r /path/to/astrbot_plugin_juhkff data/plugins/
 ```
 
 Redis 历史需要 `redis>=5.0`（插件 requirements.txt 已声明，框架加载时会自动装）
-以及一个可连的 Redis 服务；没装 Pillow 也能用：日报自动退回文字模式，Pixiv
+以及一个可连的 Redis 服务；没装 playwright/Chromium 时日报与帮助图会直接报错，Pixiv
 图片超限时只发链接；没有 Redis 时不记录主动群聊历史。
 
 首次加载后：
@@ -95,8 +95,8 @@ data/plugin_data/astrbot_plugin_juhkff/
   `resources/daily_report/`（「真寻日报 / MAHIRO NEWS」那套，含图标与背景图，共 184K），
   CSS 与图片在加载时内联成 data URI，标题手写体只保留「真寻日报」4 个字（subset 后 2KB），
   正文用系统里的中文字体（本机需装 Noto Sans SC / 文泉驿等，否则中文会显示成方框）。
-  默认**本机 Chromium** 渲染（约 2 秒），`renderer=remote` 可切回远端 t2i（20~40 秒、
-  HTML 会发给公共服务器）。`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
+  用**本机 Chromium** 渲染（约 2 秒，HTML 不出机器）；渲染失败直接回「日报生成失败」，
+  不再退回文字版。`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
   对齐上有三处不同：定时配置用「时/分」滑块代替 cron 表达式；`pre_handle` 生成的日报图
   缓存到 `data/plugin_data/astrbot_plugin_juhkff/daily_report.png`，当天内 `#日报` 直接复用
   （跨天自动失效），上游是另一个固定路径；预生成失败会按 `pre_handle_retry_sec`（默认 120 秒）
@@ -156,7 +156,7 @@ data/plugin_data/astrbot_plugin_juhkff/
   例如 Pixiv 需要 Referer）
 - 临时文件：`io.save_temp_img()`
 - 日报/帮助图出图：本机 Chromium（playwright，参数对齐上游 puppeteer 的
-  578×1885 @5 倍），不走远端 t2i；旧行为仍可通过 `daily_report.renderer=remote` 切回
+  578×1885 @5 倍），不依赖远端 t2i 服务
 - 消息发送 / LLM 调用 / 配置 / 日志：`event.chain_result()`、
   `context.llm_generate()`、`AstrBotConfig`、`astrbot.api.logger`
 - 定时任务：`context.cron_manager`（APScheduler），`Scheduler` 只做

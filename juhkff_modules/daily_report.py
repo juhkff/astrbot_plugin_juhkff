@@ -10,8 +10,8 @@
 - 摸鱼日历（距离下个节日/周末还有几天）；
 - 日期与星期。
 
-出图默认用**本机 Chromium**（playwright，参数对齐上游 puppeteer：578×5 倍），
-`renderer` 可切回远端 t2i 服务。`#日报` 随时生成；开启 `push` 后按
+出图用**本机 Chromium**（playwright，参数对齐上游 puppeteer：578×5 倍），
+失败就直接报错、不退回文字。`#日报` 随时生成；开启 `push` 后按
 `push_hour`/`push_minute` 定时推送，`pre_handle` 可提前生成缓存。
 """
 
@@ -36,10 +36,8 @@ from .common import (
     BaseModule,
     PluginLike,
     data_dir,
-    fetch_bytes,
     resolve_umo,
     save_temp_image,
-    truncate,
 )
 from .renderer import render_template
 
@@ -143,11 +141,13 @@ class DailyReportModule(BaseModule):
     # ------------------------------------------------------------ 生成
 
     async def _build_chain(self) -> MessageChain:
-        """优先用当天的缓存图，没有就现场生成。"""
+        """优先用当天的缓存图，没有就现场生成；生成失败直接报错，不退回文字。"""
         path = self._cache_path if self._cache_ok() else await self._generate()
         if path is not None:
             return MessageChain().file_image(str(path))
-        return MessageChain().message(await self._build_text())
+        return MessageChain().message(
+            "日报生成失败，详细原因看 AstrBot 日志（[juhkff] 开头）"
+        )
 
     def _cache_ok(self) -> bool:
         """缓存文件是今天生成的就复用，跨天自动失效。"""
@@ -189,11 +189,11 @@ class DailyReportModule(BaseModule):
         path = self._cache_path if self._cache_ok() else await self._generate()
         for target in groups:
             umo = resolve_umo(self.plugin.context, target)
+            if path is None:
+                logger.error("[juhkff] 日报推送：图片生成失败，本次不推送")
+                return
             try:
-                if path is not None:
-                    chain = MessageChain().file_image(str(path))
-                else:
-                    chain = MessageChain().message(await self._build_text())
+                chain = MessageChain().file_image(str(path))
                 await self.plugin.context.send_message(umo, chain)
             except Exception:
                 logger.exception(f"[juhkff] 日报推送失败: {umo}")
@@ -358,78 +358,17 @@ class DailyReportModule(BaseModule):
         }
 
     async def _render(self, data: dict[str, Any]) -> Path | None:
-        """渲染日报图：默认本机 Chromium，`renderer=remote` 时走远端 t2i。
-
-        任一环节失败都返回 None，让调用方退回纯文本日报。
-        """
+        """用本机 Chromium 渲染日报图；失败返回 None，由调用方报错（不退回文字）。"""
         payload = self._template_data(data)
-        if str(self.cfg.get("renderer") or "local") == "local":
-            png = await render_template(_load_html(), payload)
-            if not png:
-                logger.warning("[juhkff] 日报：本机渲染不可用，改用纯文本")
-                return None
-            try:
-                return Path(save_temp_image(png, ".png"))
-            except Exception:
-                logger.exception("[juhkff] 日报：保存图片失败")
-                return None
-        return await self._render_remote(payload)
-
-    async def _render_remote(self, payload: dict[str, Any]) -> Path | None:
-        """远端 t2i 服务：返回可能是 bytes、本地路径或图片 URL，都要兼容。"""
-        try:
-            renderer = self.plugin.context.html_renderer
-        except AttributeError:
+        png = await render_template(_load_html(), payload)
+        if not png:
+            logger.error("[juhkff] 日报：渲染失败")
             return None
         try:
-            result = await asyncio.wait_for(
-                renderer.render_custom_template(
-                    _load_html(),
-                    payload,
-                    return_url=False,
-                    options={"type": "png", "quality": 95, "full_page": True},
-                ),
-                timeout=120,  # 远端 t2i 出图实测 30~60s，留足余量
-            )
-        except Exception:
-            logger.exception("[juhkff] 日报：HTML 渲染失败，改用纯文本")
-            return None
-
-        raw: bytes | None = None
-        if isinstance(result, (bytes, bytearray)):
-            raw = bytes(result)
-        elif isinstance(result, str) and result:
-            if result.startswith(("http://", "https://")):
-                try:
-                    raw = await fetch_bytes(result, timeout=30)
-                except Exception:
-                    logger.exception("[juhkff] 日报：下载渲染结果失败")
-            else:
-                path = Path(result)
-                if path.exists():
-                    raw = path.read_bytes()
-        if not raw:
-            return None
-        try:
-            return Path(save_temp_image(raw, ".png"))
+            return Path(save_temp_image(png, ".png"))
         except Exception:
             logger.exception("[juhkff] 日报：保存图片失败")
             return None
-
-    async def _build_text(self) -> str:
-        data = await self._collect()
-        lines = [f"📰 日报 {data['zh_date']} {data['week']}", f"「{data['hitokoto']}」", ""]
-        if data["six"]:
-            lines.append("【60 秒读懂世界】")
-            lines.extend(f"{i}. {t}" for i, t in enumerate(data["six"], 1))
-        if data["bili"]:
-            lines.append("【B 站热搜】")
-            lines.extend(f"{i}. {x['keyword']}" for i, x in enumerate(data["bili"], 1))
-        if data["it"]:
-            lines.append("【IT 之家】")
-            lines.extend(f"{i}. {t}" for i, t in enumerate(data["it"], 1))
-        return truncate("\n".join(lines), 1800)
-
 
 def _festivals(today: date) -> list[dict[str, Any]]:
     """摸鱼日历：公历节日 + 下个周六，按剩余天数排序取前 4 个。"""

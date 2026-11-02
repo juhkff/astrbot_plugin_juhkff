@@ -384,20 +384,6 @@
         "default": true,
         "hint": "关掉只显示前 3 条"
       },
-      "renderer": {
-        "description": "日报出图方式",
-        "type": "string",
-        "options": [
-          "local",
-          "remote"
-        ],
-        "labels": [
-          "本机渲染（推荐）",
-          "远端 t2i 服务"
-        ],
-        "default": "local",
-        "hint": "本机渲染用 playwright + Chromium，约 2 秒，图片和数据不出本机；远端 t2i 要 20~40 秒，且会把整页 HTML 发到公共服务器。首次使用本机渲染需执行一次 playwright install chromium。"
-      },
       "push": {
         "description": "定时自动推送",
         "type": "bool",
