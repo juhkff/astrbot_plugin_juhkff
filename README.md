@@ -83,7 +83,7 @@ data/plugin_data/astrbot_plugin_juhkff/
 - **日报**：对齐上游 `dailyReport.ts`——`v1.hitokoto.cn` 一言、alapi 或
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
   `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数，用 Jinja2 模板交给
-  AstrBot 的 HTML 渲染器出图；`#日报` 即时生成，`daily_report_time` 定时推送。
+  AstrBot 的 HTML 渲染器出图；`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
 - **一个调试开关**：`global.debug`（全局设置 → 调试日志）打开后，各模块的明细
   （Redis、抓链接失败原因、模型能力判断等）用 INFO 输出，主动群聊还会打印每次
   请求的 system 人设、本条 user 消息与历史条数；内容含聊天原文，排查完要关。

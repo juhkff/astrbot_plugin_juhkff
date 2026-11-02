@@ -14,19 +14,20 @@
         "description": "详细日志",
         "type": "bool",
         "default": false,
-        "hint": "打开后各模块的明细用 INFO 输出（Redis、链接抓取失败原因、模型能力判断等），主动群聊还会打印每次请求的 system、user 消息与历史条数；内容含聊天原文"
+        "hint": "打开后各模块的明细用 INFO 输出（Redis、链接抓取失败原因、模型能力判断等），主动群聊还会打印每次请求的 system、user 消息与历史条数；内容含聊天原文",
+        "obvious_hint": true
       },
       "proxy": {
         "description": "HTTP 代理",
         "type": "string",
         "default": "",
-        "hint": "留空则直连，例如 http://127.0.0.1:7890"
+        "hint": "支持 http:// 与 socks5://；留空则直连（抓网页/图片时用）"
       },
       "timezone": {
         "description": "时区",
         "type": "string",
         "default": "Asia/Shanghai",
-        "hint": "日报的\"今天\"按这个时区计算"
+        "hint": "IANA 时区名，如 Asia/Shanghai、UTC；写错会退回系统本地时区"
       }
     }
   },
@@ -101,13 +102,19 @@
       "use_context": {
         "description": "携带聊天上下文",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "关掉后每次只发当前这条消息，不带任何历史（相当于每轮失忆）"
       },
       "max_history_length": {
         "description": "上下文条数",
         "type": "int",
         "default": 5,
-        "hint": "上游 maxHistoryLength；取最近多少条群消息拼进上下文"
+        "hint": "带多少条历史给模型；0 = 只发当前这条",
+        "slider": {
+          "min": 0,
+          "max": 64,
+          "step": 1
+        }
       },
       "history_ttl_hours": {
         "description": "历史过期时间（小时）",
@@ -124,7 +131,7 @@
         "description": "Redis 地址",
         "type": "string",
         "default": "redis://127.0.0.1:6379/0",
-        "hint": "主动群聊的历史存在这里；留空或连不上时不记录历史（只按当前消息回复）。格式 redis://[:密码@]主机:端口/库号"
+        "hint": "密码写成 redis://:密码@127.0.0.1:6379/0；连不上会自动退化为不存历史"
       },
       "redis_key_prefix": {
         "description": "Redis Key 前缀",
@@ -178,17 +185,24 @@
         "description": "解析通用链接",
         "type": "bool",
         "default": true,
-        "hint": "卡片里只带一条 URL 且没有标题时，抓取网页标题"
+        "hint": "关闭后只认 B 站和小黑盒；其它卡片会被忽略"
       },
       "fetch_cover": {
         "description": "附带封面图",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "B 站封面要额外请求一次 b23 短链和番剧接口，失败不影响文字解析"
       },
       "cover_timeout": {
         "description": "封面抓取超时（秒）",
         "type": "int",
-        "default": 8
+        "default": 8,
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "hint": "抓封面 / 解析短链的超时秒数"
       },
       "at_sender": {
         "description": "回复时 @ 发送者",
@@ -207,17 +221,16 @@
         "type": "bool",
         "default": false
       },
-      "expire_sec": {
-        "description": "判定窗口（秒）",
-        "type": "int",
-        "default": 259200,
-        "hint": "默认 3 天；同一张图在这个窗口内被发第二次才收藏"
-      },
       "size_limit_kb": {
         "description": "单张大小上限（KB）",
         "type": "int",
         "default": 100,
-        "hint": "上游默认 100KB，超过的不下载"
+        "hint": "超过这个大小的图不收藏；1024 = 1MB",
+        "slider": {
+          "min": 10,
+          "max": 1024,
+          "step": 10
+        }
       },
       "judge_emoji": {
         "type": "bool",
@@ -236,18 +249,33 @@
         "description": "每群最多收藏",
         "type": "int",
         "default": 50,
-        "hint": "超出后删最旧的"
+        "hint": "每个群最多存多少张，超出按收藏时间淘汰最旧的",
+        "slider": {
+          "min": 10,
+          "max": 500,
+          "step": 10
+        }
       },
       "default_reply_rate": {
         "description": "默认接话概率",
         "type": "float",
-        "default": 0.1
+        "default": 0.1,
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        }
       },
       "default_emoji_rate": {
         "description": "默认发图概率",
         "type": "float",
         "default": 0.2,
-        "hint": "接话命中后，再按这个概率决定发图还是不发"
+        "hint": "接话命中后，再按这个概率决定发图还是不发",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        }
       },
       "group_rates": {
         "description": "分群覆盖",
@@ -288,6 +316,17 @@
             }
           }
         }
+      },
+      "expire_hours": {
+        "description": "表情判定窗口（小时）",
+        "type": "int",
+        "default": 72,
+        "slider": {
+          "min": 0,
+          "max": 720,
+          "step": 1
+        },
+        "hint": "同一张图在窗口内被同群发第二次才收藏；0 = 永不过期"
       }
     }
   },
@@ -319,12 +358,6 @@
         "type": "bool",
         "default": false
       },
-      "daily_report_time": {
-        "description": "推送时间（cron）",
-        "type": "string",
-        "default": "0 0 12 * * ?",
-        "hint": "上游 dailyReportTime；Quartz 6 段或 5 段 crontab 都行"
-      },
       "push_group_list": {
         "description": "推送群列表",
         "type": "list",
@@ -338,10 +371,46 @@
         "default": false,
         "hint": "上游 preHandle；在推送前先生成并缓存图片"
       },
-      "pre_handle_time": {
-        "description": "预生成时间（cron）",
-        "type": "string",
-        "default": "0 0 10 * * ?"
+      "push_hour": {
+        "description": "推送时间-时",
+        "type": "int",
+        "default": 12,
+        "slider": {
+          "min": 0,
+          "max": 23,
+          "step": 1
+        },
+        "hint": "按 global.timezone 计算，下同"
+      },
+      "push_minute": {
+        "description": "推送时间-分",
+        "type": "int",
+        "default": 0,
+        "slider": {
+          "min": 0,
+          "max": 59,
+          "step": 1
+        }
+      },
+      "pre_handle_hour": {
+        "description": "提前生成-时",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 23,
+          "step": 1
+        }
+      },
+      "pre_handle_minute": {
+        "description": "提前生成-分",
+        "type": "int",
+        "default": 0,
+        "slider": {
+          "min": 0,
+          "max": 59,
+          "step": 1
+        }
       }
     }
   },
@@ -366,7 +435,12 @@
         "description": "检查间隔（分钟）",
         "type": "int",
         "default": 60,
-        "hint": "Pixiv 有游客限流，不建议低于 30"
+        "hint": "最勤快的轮询间隔；Pixiv 有游客限流，别低于 30",
+        "slider": {
+          "min": 10,
+          "max": 1440,
+          "step": 10
+        }
       },
       "ranking_mode": {
         "description": "榜单类型",
@@ -377,18 +451,33 @@
           "week",
           "month"
         ],
-        "hint": "日榜 / 周榜 / 月榜"
+        "hint": "日榜 / 周榜 / 月榜",
+        "labels": [
+          "日榜",
+          "周榜",
+          "月榜"
+        ]
       },
       "max_push_per_run": {
         "description": "单次推送上限",
         "type": "int",
-        "default": 2
+        "default": 2,
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        }
       },
       "max_image_mb": {
         "description": "图片大小上限（MB）",
         "type": "float",
         "default": 8.0,
-        "hint": "超过则压缩，压缩失败只发文字"
+        "hint": "超过则压缩，压缩失败只发文字",
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 0.5
+        }
       }
     }
   },
@@ -405,7 +494,8 @@
       "command": {
         "description": "触发指令",
         "type": "string",
-        "default": "帮助"
+        "default": "帮助",
+        "hint": "触发词本身，不要带前缀；默认「帮助」= 群里发 #帮助 或 /帮助"
       },
       "title_zh": {
         "description": "中文标题",

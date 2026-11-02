@@ -1,7 +1,7 @@
 """偷表情：行为对齐上游 `src/apps/emojiSave.ts`。
 
 原则和上游一致：不判断「这张图像不像表情」，而是看群友怎么用——同一张图
-在 `expire_sec`（默认 3 天）内被同一个群发过第二次，就认为它被当成表情在
+在 `expire_hours`（默认 72 小时）内被同一个群发过第二次，就认为它被当成表情在
 用，落盘收藏。
 
 与之前的实现相比的差异：
@@ -62,7 +62,7 @@ class EmojiStealModule(BaseModule):
         # 群号 -> {sha256: {"file", "saved_at", "umo"}}，即「已收藏」图库
         self._index: dict[str, dict[str, dict[str, Any]]] = {}
         # 群号 -> {sha256: {"first": ts}}，指「第一次见到这张图」的时间，
-        # 用来判断它是否在 expire_sec 窗口内又被发了一次
+        # 用来判断它是否在 expire_hours 窗口内又被发了一次
         self._prints: dict[str, dict[str, dict[str, float]]] = {}
         self._lock = asyncio.Lock()
         self._rng = random.SystemRandom()
@@ -98,7 +98,10 @@ class EmojiStealModule(BaseModule):
 
     @property
     def _expire(self) -> float:
-        """「同一张图」的认定窗口，默认 3 天。"""
+        """「同一张图」的认定窗口，单位秒；配置按小时填，0 表示永不过期。"""
+        if "expire_hours" in self.cfg:
+            return max(0.0, float(self.cfg.get("expire_hours") or 0)) * 3600
+        # 兼容旧配置：expire_sec（秒），默认 3 天
         return float(self.cfg.get("expire_sec", 259200) or 259200)
 
     @property

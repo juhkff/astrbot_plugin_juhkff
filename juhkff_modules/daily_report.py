@@ -11,7 +11,7 @@
 - 日期与星期。
 
 用 AstrBot 的 HTML 渲染器出图（Jinja2 模板）：`#日报` 随时生成；开启 `push`
-后按 `daily_report_time` 定时推送，`pre_handle` 可提前生成缓存。
+后按 `push_hour`/`push_minute` 定时推送，`pre_handle` 可提前生成缓存。
 """
 
 from __future__ import annotations
@@ -90,19 +90,34 @@ class DailyReportModule(BaseModule):
     # ------------------------------------------------------------ 生命周期
 
     async def start(self) -> None:
-        """注册两个可选定时任务：提前生成缓存、定时推送。"""
+        """注册两个可选定时任务：提前生成缓存、定时推送（配置是「时:分」滑块）。"""
         self._cache_path = data_dir() / "daily_report.png"
         if bool(self.cfg.get("pre_handle", False)):
-            expr = str(self.cfg.get("pre_handle_time") or "0 0 10 * * ?")
-            await self.scheduler.cron(expr, self._refresh_cache, "report-prehandle")
+            await self.scheduler.daily(
+                self._hhmm("pre_handle_hour", "pre_handle_minute", 10, 0),
+                self._refresh_cache,
+                "report-prehandle",
+            )
         if bool(self.cfg.get("push", False)):
-            expr = str(self.cfg.get("daily_report_time") or "0 0 12 * * ?")
-            await self.scheduler.cron(expr, self._push, "report-push")
+            await self.scheduler.daily(
+                self._hhmm("push_hour", "push_minute", 12, 0),
+                self._push,
+                "report-push",
+            )
         logger.info(
             f"[juhkff] 日报已就绪：推送 "
             f"{'开' if self.cfg.get('push') else '关'}，"
             f"预处理 {'开' if self.cfg.get('pre_handle') else '关'}"
         )
+
+    def _hhmm(self, hour_key: str, minute_key: str, hour: int, minute: int) -> str:
+        """把「时 / 分」两个滑块拼成 Scheduler.daily() 要的 HH:MM。"""
+        try:
+            h = int(self.cfg.get(hour_key, hour))
+            m = int(self.cfg.get(minute_key, minute))
+        except (TypeError, ValueError):
+            return f"{hour:02d}:{minute:02d}"
+        return f"{h % 24:02d}:{m % 60:02d}"
 
     async def stop(self) -> None:
         pass
