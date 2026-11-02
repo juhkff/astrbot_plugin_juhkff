@@ -88,6 +88,11 @@ data/plugin_data/astrbot_plugin_juhkff/
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
   `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数，用 Jinja2 模板交给
   AstrBot 的 HTML 渲染器出图；`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
+  对齐上有三处不同：定时配置用「时/分」滑块代替 cron 表达式；`pre_handle` 生成的日报图
+  缓存到 `data/plugin_data/astrbot_plugin_juhkff/daily_report.png`，当天内 `#日报` 直接复用
+  （跨天自动失效），上游是另一个固定路径；预生成失败会按 `pre_handle_retry_sec`（默认 120 秒）
+  重试最多 5 次，对应上游 `preHandleRetryInterval`。`daily_report_full_show` 与上游语义一致：
+  条数不变，关掉只是每条单行省略显示。
 - **一个调试开关**：`global.debug`（全局设置 → 调试日志）打开后，各模块的明细
   （Redis、抓链接失败原因、模型能力判断等）用 INFO 输出，主动群聊还会打印每次
   请求的 system 人设、本条 user 消息与历史条数；内容含聊天原文，排查完要关。

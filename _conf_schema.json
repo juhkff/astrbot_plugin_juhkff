@@ -444,6 +444,17 @@
           "max": 59,
           "step": 1
         }
+      },
+      "pre_handle_retry_sec": {
+        "description": "预生成失败重试间隔（秒）",
+        "type": "int",
+        "default": 120,
+        "slider": {
+          "min": 30,
+          "max": 600,
+          "step": 30
+        },
+        "hint": "提前生成失败（接口超时、图渲染失败）时，每隔这么久重试一次，最多 5 次；对齐原插件的 preHandleRetryInterval"
       }
     }
   },

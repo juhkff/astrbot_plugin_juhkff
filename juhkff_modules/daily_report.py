@@ -80,6 +80,7 @@ class DailyReportModule(BaseModule):
     def __init__(self, plugin: PluginLike) -> None:
         super().__init__(plugin)
         self._cache_path: Path | None = None
+        self._retrying = False
         self._lock = asyncio.Lock()
 
     def help_entries(self):
@@ -160,6 +161,21 @@ class DailyReportModule(BaseModule):
     async def _refresh_cache(self) -> None:
         if await self._generate() is not None:
             logger.info("[juhkff] 日报已预生成")
+            return
+        # 对齐上游 preHandleRetryInterval：预生成失败就隔一会儿再试，最多 5 次
+        delay = max(30, int(self.cfg.get("pre_handle_retry_sec", 120) or 120))
+        if self._retrying:
+            return
+        self._retrying = True
+        try:
+            for _ in range(5):
+                await asyncio.sleep(delay)
+                if await self._generate() is not None:
+                    logger.info("[juhkff] 日报预生成重试成功")
+                    return
+            logger.warning("[juhkff] 日报预生成多次失败，等到推送时再试")
+        finally:
+            self._retrying = False
 
     async def _push(self) -> None:
         """把日报发到配置的群。群号支持纯数字或完整 umo。"""
@@ -313,16 +329,19 @@ class DailyReportModule(BaseModule):
     # ------------------------------------------------------------ 渲染
 
     def _template_data(self, data: dict[str, Any]) -> dict[str, Any]:
-        """把采集结果整理成模板变量；`full_show` 关掉时新闻只留 3 条。"""
-        news = data["six"] if data["full_show"] else data["six"][:3]
+        """把采集结果整理成模板变量。
+
+        `full_show` 对齐上游：条数不变，关掉时每条只显示一行（超出用省略号），
+        打开时完整换行显示。
+        """
         return {
             "week": data["week"],
             "date": data["date"],
             "zh_date": data["zh_date"],
             "hitokoto": data["hitokoto"],
             "festivals": data["festivals"],
-            "news": news,
-            "news_total": len(data["six"]),
+            "news": data["six"],
+            "full_show": data["full_show"],
             "bili": data["bili"],
             "it": data["it"],
             "anime": data["anime"],
@@ -420,6 +439,7 @@ body { width:578px; font-family:"Noto Sans CJK SC","WenQuanYi Zen Hei",sans-seri
 .sec { margin-top:16px; }
 .sec .title { font-size:16px; font-weight:700; color:#111827; margin-bottom:8px; }
 .news li { font-size:13.5px; line-height:1.7; color:#374151; margin-left:18px; }
+.news.lite li { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .more { font-size:12px; color:#9ca3af; margin-top:4px; margin-left:4px; }
 .tag { display:inline-block; font-size:12px; color:#2563eb; background:#eff6ff;
        border-radius:6px; padding:2px 8px; margin:3px 6px 0 0; }
@@ -438,8 +458,7 @@ body { width:578px; font-family:"Noto Sans CJK SC","WenQuanYi Zen Hei",sans-seri
 {% endif %}
 {% if news %}
 <div class="sec"><div class="title">🌍 60 秒读懂世界</div>
-<ol class="news">{% for n in news %}<li>{{ n }}</li>{% endfor %}</ol>
-{% if news_total > news|length %}<div class="more">共 {{ news_total }} 条，仅显示前 {{ news|length }} 条</div>{% endif %}
+<ol class="news{% if not full_show %} lite{% endif %}">{% for n in news %}<li>{{ n }}</li>{% endfor %}</ol>
 </div>
 {% endif %}
 {% if bili %}
@@ -449,7 +468,7 @@ body { width:578px; font-family:"Noto Sans CJK SC","WenQuanYi Zen Hei",sans-seri
 {% endif %}
 {% if it %}
 <div class="sec"><div class="title">💻 IT 之家</div>
-<ol class="news">{% for t in it %}<li>{{ t }}</li>{% endfor %}</ol>
+<ol class="news{% if not full_show %} lite{% endif %}">{% for t in it %}<li>{{ t }}</li>{% endfor %}</ol>
 </div>
 {% endif %}
 {% if anime %}
