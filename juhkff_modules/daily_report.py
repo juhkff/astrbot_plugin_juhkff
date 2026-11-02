@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import re
 import xml.etree.ElementTree as ET
@@ -335,16 +336,23 @@ class DailyReportModule(BaseModule):
         打开时完整换行显示。
         """
         return {
-            "week": data["week"],
-            "date": data["date"],
-            "zh_date": data["zh_date"],
-            "hitokoto": data["hitokoto"],
-            "festivals": data["festivals"],
-            "news": data["six"],
-            "full_show": data["full_show"],
-            "bili": data["bili"],
-            "it": data["it"],
-            "anime": data["anime"],
+            "data": {
+                "week": data["week"],
+                "date": data["date"],
+                "zh_date": data["zh_date"],
+                "data_hitokoto": data["hitokoto"],
+                "data_six": data["six"],
+                # 上游模板里 bili/anime/festival 都是 [文字, 图片]/[天数, 名称] 的两元组
+                "data_bili": [
+                    [b["keyword"], b["icon"] or _EMPTY_IMG] for b in data["bili"]
+                ],
+                "data_it": data["it"],
+                "data_anime": [
+                    [a["name"], a["image"] or _EMPTY_IMG] for a in data["anime"]
+                ],
+                "data_festival": [[f["days"], f["name"]] for f in data["festivals"]],
+                "full_show": data["full_show"],
+            }
         }
 
     async def _render(self, data: dict[str, Any]) -> Path | None:
@@ -360,12 +368,12 @@ class DailyReportModule(BaseModule):
         try:
             result = await asyncio.wait_for(
                 renderer.render_custom_template(
-                    _HTML,
+                    _load_html(),
                     self._template_data(data),
                     return_url=False,
                     options={"type": "png", "quality": 95, "full_page": True},
                 ),
-                timeout=60,
+                timeout=120,  # 远端 t2i 出图实测 30~60s，留足余量
             )
         except Exception:
             logger.exception("[juhkff] 日报：HTML 渲染失败，改用纯文本")
@@ -425,58 +433,56 @@ def _festivals(today: date) -> list[dict[str, Any]]:
     return [{"name": name, "days": (when - today).days} for name, when in marks[:4]]
 
 
-_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { width:578px; font-family:"Noto Sans CJK SC","WenQuanYi Zen Hei",sans-serif;
-       background:#f2f4f8; color:#1f2430; padding:18px; }
-.card { background:#fff; border-radius:16px; padding:20px; box-shadow:0 2px 12px rgba(0,0,0,.06); }
-.head { display:flex; align-items:baseline; gap:12px; border-bottom:2px solid #eef1f6; padding-bottom:12px; }
-.head .week { font-size:26px; font-weight:700; color:#3b82f6; }
-.head .date { font-size:15px; color:#6b7280; }
-.hitokoto { margin-top:12px; font-size:14px; color:#4b5563; font-style:italic;
-            background:#f8fafc; border-left:4px solid #93c5fd; padding:8px 12px; border-radius:6px; }
-.sec { margin-top:16px; }
-.sec .title { font-size:16px; font-weight:700; color:#111827; margin-bottom:8px; }
-.news li { font-size:13.5px; line-height:1.7; color:#374151; margin-left:18px; }
-.news.lite li { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.more { font-size:12px; color:#9ca3af; margin-top:4px; margin-left:4px; }
-.tag { display:inline-block; font-size:12px; color:#2563eb; background:#eff6ff;
-       border-radius:6px; padding:2px 8px; margin:3px 6px 0 0; }
-.anime { display:flex; flex-wrap:wrap; gap:10px; }
-.anime .item { width:120px; }
-.anime img { width:120px; height:160px; object-fit:cover; border-radius:8px; display:block; }
-.anime .name { font-size:12px; color:#374151; margin-top:4px; line-height:1.4; }
-.foot { margin-top:18px; text-align:center; font-size:11px; color:#9ca3af; }
-</style></head><body><div class="card">
-<div class="head"><span class="week">{{ week }}</span><span class="date">{{ date }} · {{ zh_date }}</span></div>
-<div class="hitokoto">「{{ hitokoto }}」</div>
-{% if festivals %}
-<div class="sec"><div class="title">🐟 摸鱼日历</div>
-{% for f in festivals %}<span class="tag">距离{{ f.name }}还有 {{ f.days }} 天</span>{% endfor %}
-</div>
-{% endif %}
-{% if news %}
-<div class="sec"><div class="title">🌍 60 秒读懂世界</div>
-<ol class="news{% if not full_show %} lite{% endif %}">{% for n in news %}<li>{{ n }}</li>{% endfor %}</ol>
-</div>
-{% endif %}
-{% if bili %}
-<div class="sec"><div class="title">🔥 B 站热搜</div>
-{% for b in bili %}<span class="tag">{{ loop.index }}. {{ b.keyword }}</span>{% endfor %}
-</div>
-{% endif %}
-{% if it %}
-<div class="sec"><div class="title">💻 IT 之家</div>
-<ol class="news{% if not full_show %} lite{% endif %}">{% for t in it %}<li>{{ t }}</li>{% endfor %}</ol>
-</div>
-{% endif %}
-{% if anime %}
-<div class="sec"><div class="title">📺 今日番剧</div>
-<div class="anime">{% for a in anime %}<div class="item">
-{% if a.image %}<img src="{{ a.image }}">{% endif %}
-<div class="name">{{ a.name }}</div></div>{% endfor %}</div>
-</div>
-{% endif %}
-<div class="foot">AstrBot · juhkff-plugin</div>
-</div></body></html>"""
+_RES_DIR = Path(__file__).resolve().parent.parent / "resources" / "daily_report"
+_HTML_CACHE: str | None = None
+# 1x1 透明图：上游模板里 icon/封面为空的项不至于显示成裂图
+_EMPTY_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+
+def _data_uri(path: Path) -> str:
+    """把本地图片转成 data URI，避免渲染端拿不到相对路径。"""
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix in {"ttf", "otf", "woff", "woff2"}:
+        mime = f"font/{suffix}"
+    else:
+        mime = f"image/{'jpeg' if suffix == 'jpg' else suffix}"
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
+
+
+def _load_html() -> str:
+    """加载上游「真寻日报」模板：内联 CSS、图片转 data URI。
+
+    上游 3 个字体共 19MB，全部内联不现实：
+    - 标题字体只保留「真寻日报」4 个字（subset 后 2KB），保住手写体标题；
+    - 正文字体交给渲染端的系统中文字体。
+    """
+    global _HTML_CACHE
+    if _HTML_CACHE is not None:
+        return _HTML_CACHE
+    html = (_RES_DIR / "main.html").read_text(encoding="utf-8")
+    css = (_RES_DIR / "main.css").read_text(encoding="utf-8")
+    title_uri = _data_uri(_RES_DIR / "res" / "font" / "title.ttf")
+
+    def _face(block: str) -> str:
+        if "SSFangTangTi" not in block:
+            return ""
+        return (
+            '@font-face { font-family: "SSFangTangTi"; '
+            f'src: url("{title_uri}") format("truetype"); }}'
+        )
+
+    css = re.sub(r"@font-face\s*\{[^}]*\}", lambda m: _face(m.group(0)), css)
+    css += (
+        '\nbody, .wrapper { font-family: "Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Zen Hei", sans-serif; }\n'
+        # 模板按 578px 设计，而渲染端视口固定 800px：让卡片水平居中，避免右侧留一条白边
+        "html, body { width: 100%; margin: 0; padding: 0; background: #fff; }\n"
+        "body { display: flex; justify-content: center; }\n"
+    )
+    html = html.replace(
+        '<link rel="stylesheet" href="main.css" />', f"<style>{css}</style>"
+    )
+    for path in sorted((_RES_DIR / "res").rglob("*.png")):
+        rel = "./" + path.relative_to(_RES_DIR).as_posix()
+        html = html.replace(f'src="{rel}"', f'src="{_data_uri(path)}"')
+    _HTML_CACHE = html
+    return html

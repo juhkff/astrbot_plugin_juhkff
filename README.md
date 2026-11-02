@@ -86,8 +86,10 @@ data/plugin_data/astrbot_plugin_juhkff/
   从插件数据目录算起，目录不存在会自动创建，增删在 60 秒内生效。
 - **日报**：对齐上游 `dailyReport.ts`——`v1.hitokoto.cn` 一言、alapi 或
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
-  `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数，用 Jinja2 模板交给
-  AstrBot 的 HTML 渲染器出图；`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
+  `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数；**出图模板直接沿用上游**
+  `resources/daily_report/`（「真寻日报 / MAHIRO NEWS」那套，含图标与背景图，共 184K），
+  CSS 与图片在加载时内联成 data URI，标题手写体只保留「真寻日报」4 个字（subset 后 2KB），
+  正文字体交给渲染端。`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
   对齐上有三处不同：定时配置用「时/分」滑块代替 cron 表达式；`pre_handle` 生成的日报图
   缓存到 `data/plugin_data/astrbot_plugin_juhkff/daily_report.png`，当天内 `#日报` 直接复用
   （跨天自动失效），上游是另一个固定路径；预生成失败会按 `pre_handle_retry_sec`（默认 120 秒）
