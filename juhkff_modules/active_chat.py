@@ -90,6 +90,49 @@ HISTORY_MAX = 64
 DEFAULT_PREFIX = "juhkff:active_chat"
 
 _URL_RE = re.compile(r"https?://[^\s，。！？、）)]+")
+
+_URL_CACHE_TTL = 600  # 同一 URL 的正文缓存 10 分钟
+_URL_CACHE_MAX = 32  # 最多缓存多少个页面
+
+
+def _focus_slice(text: str, focus: str, limit: int) -> str:
+    """按「关注点」挑段落：保留开头（标题/导语），再补上最相关的句子。
+
+    纯词面匹配，不额外调用模型：中文按二字切词，英文/数字按词切；
+    得分 = 命中次数 / 段落长度开方（避免长段落天然占优），越靠前略优先。
+    """
+    paras = [p.strip() for p in re.split(r"\n+|(?<=[。！？!?；;])", text) if p.strip()]
+    if not paras:
+        return truncate(text, limit)
+    terms = {focus[i : i + 2] for i in range(len(focus) - 1)}
+    terms |= set(re.findall(r"[A-Za-z0-9]{2,}", focus.lower()))
+    picked: list[tuple[int, str]] = []
+    budget = limit
+    for i, para in enumerate(paras[:2]):
+        if budget <= 0:
+            break
+        body = truncate(para, budget)
+        picked.append((i, body))
+        budget -= len(body)
+    scored: list[tuple[float, int, str]] = []
+    for i, para in enumerate(paras[2:], start=2):
+        if not terms or budget <= 0:
+            break
+        low = para.lower()
+        hits = sum(low.count(t) for t in terms)
+        if hits == 0:
+            continue
+        score = hits / (len(para) ** 0.5 + 1) - i * 0.01
+        scored.append((score, i, para))
+    for _, i, para in sorted(scored, key=lambda x: -x[0]):
+        if budget <= 0:
+            break
+        body = truncate(para, budget)
+        picked.append((i, body))
+        budget -= len(body)
+    picked.sort(key=lambda x: x[0])
+    return " ".join(p for _, p in picked)
+
 _TAG_RE = re.compile(r"<script.*?</script>|<style.*?</style>|<[^>]+>", re.S | re.I)
 
 
@@ -106,6 +149,9 @@ class ActiveChatModule(BaseModule):
         self._prefix = str(self.cfg.get("redis_key_prefix") or DEFAULT_PREFIX)
         # 机器人昵称缓存：self_id -> 昵称（取不到就存 QQ 号）
         self._bot_names: dict[str, str] = {}
+        # 网页正文缓存：url -> (抓取时间, 正文)。同一链接反复被工具调用时
+        # 只抓一次，按不同「关注点」重新挑段落不额外走网络
+        self._url_cache: dict[str, tuple[float, str]] = {}
 
     def help_entries(self):
         return [
@@ -930,7 +976,14 @@ class ActiveChatModule(BaseModule):
                             "url": {
                                 "type": "string",
                                 "description": "要读取的网页地址，必须是 http/https",
-                            }
+                            },
+                            "focus": {
+                                "type": "string",
+                                "description": (
+                                    "你想从页面里找什么，例如「视频标题和作者」「价格」「发布时间」。"
+                                    "填了会只挑相关段落；不填就返回开头部分"
+                                ),
+                            },
                         },
                         "required": ["url"],
                     },
@@ -939,21 +992,41 @@ class ActiveChatModule(BaseModule):
             ]
         )
 
-    async def _fetch_url_for_model(self, event: AstrMessageEvent, url: str) -> str:
-        """fetch_url 工具的实现：抓正文并压成一段文本返回给模型。"""
-        limit = max(100, int(self.cfg.get("url_content_chars", 400) or 400))
+    async def _page_text(self, url: str) -> str:
+        """抓网页正文，并做 10 分钟缓存（同一链接被反复调用时只抓一次）。"""
+        now = time.time()
+        hit = self._url_cache.get(url)
+        if hit and now - hit[0] < _URL_CACHE_TTL:
+            return hit[1]
         timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            html = await self._fetch_public_page(session, url)
+        if not html:
+            return ""
+        text = re.sub(r"\s+", " ", _TAG_RE.sub(" ", html)).strip()
+        if text:
+            self._url_cache[url] = (now, text)
+            if len(self._url_cache) > _URL_CACHE_MAX:
+                oldest = min(self._url_cache, key=lambda k: self._url_cache[k][0])
+                self._url_cache.pop(oldest, None)
+        return text
+
+    async def _fetch_url_for_model(
+        self, event: AstrMessageEvent, url: str, focus: str = ""
+    ) -> str:
+        """fetch_url 工具的实现：抓正文；给了关注点就只挑相关段落返回。"""
+        limit = max(100, int(self.cfg.get("url_content_chars", 400) or 400))
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                html = await self._fetch_public_page(session, str(url))
+            text = await self._page_text(str(url))
         except Exception as exc:
             return f"读取失败：{exc}"
-        if not html:
+        if not text:
             return "读取失败：页面打不开、被拦截，或者需要登录。"
-        plain = re.sub(r"\s+", " ", _TAG_RE.sub(" ", html)).strip()
-        if not plain:
-            return "页面没有可读的正文（可能完全由脚本渲染）。"
-        return truncate(plain, limit)
+        focus = str(focus or "").strip()
+        if focus:
+            body = _focus_slice(text, focus, limit)
+            return f"（按你关心的「{truncate(focus, 30)}」挑出的相关段落）\n{body}"
+        return truncate(text, limit)
 
     @staticmethod
     def _text_only_contexts(contexts: list[Message]) -> list[Message]:
