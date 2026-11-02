@@ -358,13 +358,11 @@ class ActiveChatModule(BaseModule):
         }
         if image_refs:
             entry["images"] = image_refs
-        # 提取模式：正文只抓一次，抓到了就跟着这条消息一起进历史，
-        # 后面几轮聊到同一个链接时不用重抓，也能接着上下文说话
+        # 提取模式：正文只为本轮抓一次，不写进历史（历史里只留群友原话里的链接，
+        # 后续轮次如果还想看内容，由模型处理模式下的 fetch_url 现抓）
         link_text = ""
         if self._url_mode() == "extract":
             link_text = await self._analyze_urls(text)
-            if link_text and bool(self.cfg.get("link_in_history", True)):
-                entry["link"] = link_text
         await self._append(umo, entry)
 
         # 掷骰子决定这次要不要接话；不接就静默返回，等后续消息
@@ -618,11 +616,6 @@ class ActiveChatModule(BaseModule):
                 )
                 continue
             stamp = self._format_ts(item.get("ts"))
-            # 提取模式下存下来的链接正文，按「先说正文、再说这句话」的顺序还原，
-            # 让人和消息本体保持一一对应
-            link = str(item.get("link") or "")
-            if link:
-                contexts.append(UserMessageSegment(content=[TextPart(text=link)]))
             head = f"{stamp} {item.get('name')}：{text}" if stamp else f"{item.get('name')}：{text}"
             parts: list[Any] = [TextPart(text=head)]
             # 历史图跟在文字后面，顺序与发送时一致；模型支持图片时能看到它们
