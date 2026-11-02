@@ -145,11 +145,21 @@
         "default": true,
         "hint": "重启机器人时清空历史（WebUI 里保存配置触发的热重载不会清）；关掉则重启后继续用旧上下文"
       },
-      "attach_url_analysis": {
-        "description": "附带链接内容",
-        "type": "bool",
-        "default": false,
-        "hint": "先抓消息里链接的正文，再让模型接话"
+      "url_mode": {
+        "description": "链接处理方式",
+        "type": "string",
+        "default": "extract",
+        "options": [
+          "off",
+          "model",
+          "extract"
+        ],
+        "labels": [
+          "关闭",
+          "模型处理",
+          "提取"
+        ],
+        "hint": "关闭：不处理链接。模型处理：给模型一个「读网页」的工具，它觉得需要才去读，会多一次模型请求。提取：先把正文抓下来再一起发给模型，不额外花请求，但可能读到用不上的内容"
       },
       "url_content_chars": {
         "description": "链接正文长度（字）",
@@ -160,7 +170,7 @@
           "max": 2000,
           "step": 100
         },
-        "hint": "每个链接最多带多少字正文；只作为独立参考消息交给模型，不拼进群友原话"
+        "hint": "每个链接最多带多少字正文，模型处理和提取都按这个长度截断"
       },
       "persona_prompt": {
         "description": "人设提示词",
