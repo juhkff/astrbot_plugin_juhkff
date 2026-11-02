@@ -72,6 +72,9 @@ data/plugin_data/astrbot_plugin_juhkff/
 - **偷表情**：对齐上游——同一张图（sha256）在 3 天窗口内被同一个群发第二次就收藏，
   按群分目录存（`emoji/<群号>/`），单张 ≤100KB、每群最多 50 张；每条群消息先按
   `default_reply_rate`、再按 `default_emoji_rate` 掷两次骰子决定要不要随机发一张。
+  可选的「启用表情包判断」会在每张图第一次出现时交给模型判断（`judge_provider`
+  留空则用当前会话模型），判为「否」就不计数并清掉旧计数；模型报错时按未判断处理，
+  不阻塞收藏。
 - **日报**：对齐上游 `dailyReport.ts`——`v1.hitokoto.cn` 一言、alapi 或
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
   `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数，用 Jinja2 模板交给

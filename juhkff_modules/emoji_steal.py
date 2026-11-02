@@ -11,7 +11,9 @@
 - 单张上限从 2MB 收紧到上游的 100KB（表情一般都很小）；
 - 每组最多 50 张，超出删最旧的（上游是随机删一张）；
 - 每次群消息都会按 `default_emoji_rate` / 分群配置掷骰子，决定要不要随机
-  发一张已收藏的表情（上游是先在 reply_rate 命中后再按 emoji_rate 抽）。
+  发一张已收藏的表情（上游是先在 reply_rate 命中后再按 emoji_rate 抽）；
+- 可选「启用表情包判断」：交给对话模型判断这张图是不是表情包，不是就不参与
+  计数（已有的计数一并清掉），避免把截图、照片误收进图库。
 """
 
 from __future__ import annotations
@@ -28,6 +30,9 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image
 
 from .common import BaseModule, PluginLike, data_dir, load_json, save_json, subdir
+
+# 「是不是表情包」的判断提示词：要求模型只回一个「是」或「否」
+_JUDGE_PROMPT = "这张图片是不是表情包（贴纸 / sticker，用于聊天中表达语气或玩梗）？只回答「是」或「否」，不要加标点或解释。"
 
 _MAGIC = (
     (b"\x89PNG\r\n\x1a\n", "png"),
@@ -104,6 +109,11 @@ class EmojiStealModule(BaseModule):
     @property
     def _max_per_group(self) -> int:
         return max(1, int(self.cfg.get("max_per_group", 50) or 50))
+
+    @property
+    def _judge_enabled(self) -> bool:
+        """是否让模型判断「这张图是不是表情包」。"""
+        return bool(self.cfg.get("judge_emoji", False))
 
     def _rates(self, group_key: str, umo: str) -> tuple[float, float]:
         """返回 (接话概率, 接话时发表情概率)。
@@ -200,7 +210,9 @@ class EmojiStealModule(BaseModule):
         changed = False
         for seg in segments:
             try:
-                local = await asyncio.to_thread(seg.convert_to_file_path)
+                # 注意：convert_to_file_path 是 async 方法（内部自己判断 URL/本地/Base64
+                # 并下载），不能丢进 to_thread，否则拿到的是未 await 的协程对象
+                local = await seg.convert_to_file_path()
             except Exception as exc:
                 self.debug(f"[juhkff] 表情图片转存失败: {exc}")
                 continue
@@ -217,15 +229,42 @@ class EmojiStealModule(BaseModule):
                 continue
 
             digest = hashlib.sha256(data).hexdigest()
+
+            # 已收藏的直接跳过，不浪费一次模型调用
+            async with self._lock:
+                if digest in (self._index.get(group_key) or {}):
+                    continue
+                record = (self._prints.get(group_key) or {}).get(digest)
+
+            # 第一次见到这张图时，可选地让模型判断是不是表情包。
+            # 判断放在锁外：网络请求很慢，不能堵住别的图片处理。
+            judged: bool | None = None
+            if self._judge_enabled and not (record and record.get("emoji")):
+                judged = await self._judge(path, umo)
+                if judged is False:
+                    # 不是表情包：不处理；如果之前已经计过数，把计数清掉
+                    async with self._lock:
+                        prints = self._prints.get(group_key) or {}
+                        if prints.pop(digest, None) is not None:
+                            changed = True
+                            logger.info(
+                                f"[juhkff] 判为表情包：否，清除 {digest[:8]} 的计数"
+                            )
+                    continue
+
             async with self._lock:
                 group_index = self._index.setdefault(group_key, {})
-                if digest in group_index:
+                if digest in group_index:  # 并发下可能已被别的消息收藏
                     continue
 
                 prints = self._prints.setdefault(group_key, {})
                 record = prints.get(digest)
                 if record is None or now - float(record.get("first", 0)) > self._expire:
-                    prints[digest] = {"first": now}
+                    entry: dict[str, Any] = {"first": now}
+                    if judged is True:
+                        # 记下来，第二次出现时不用再调一次模型
+                        entry["emoji"] = True
+                    prints[digest] = entry
                     changed = True
                     continue
 
@@ -250,6 +289,46 @@ class EmojiStealModule(BaseModule):
 
         if changed:
             await asyncio.to_thread(self._save)
+
+    async def _judge(self, path: Path, umo: str) -> bool | None:
+        """让模型判断一张图是不是表情包。
+
+        返回 True（是）/ False（不是）/ None（判断不了，按未判断处理，
+        继续走原本的「重复出现即收藏」逻辑，避免模型故障时功能整体失效）。
+        """
+        ctx = self.plugin.context
+        provider_id = str(self.cfg.get("judge_provider") or "")
+        if not provider_id:
+            try:
+                provider_id = await ctx.get_current_chat_provider_id(umo=umo)
+            except Exception as exc:
+                self.debug(f"[juhkff] 表情判断：取当前模型失败: {exc}")
+                provider_id = ""
+        if not provider_id:
+            self.debug("[juhkff] 表情判断：没有可用模型，跳过判断")
+            return None
+
+        try:
+            resp = await asyncio.wait_for(
+                ctx.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=_JUDGE_PROMPT,
+                    image_urls=[str(path)],
+                ),
+                timeout=20.0,
+            )
+        except Exception as exc:
+            self.debug(f"[juhkff] 表情判断失败（按未判断处理）: {exc}")
+            return None
+
+        text = str(getattr(resp, "completion_text", "") or "").strip()
+        lowered = text.lower()
+        if text.startswith("是") or lowered.startswith(("yes", "true", "y")):
+            return True
+        if text.startswith(("否", "不", "没")) or lowered.startswith(("no", "false", "n")):
+            return False
+        self.debug(f"[juhkff] 表情判断返回无法识别的内容: {text[:30]}")
+        return None
 
     @staticmethod
     def _image_segments(event: AstrMessageEvent) -> list[Image]:

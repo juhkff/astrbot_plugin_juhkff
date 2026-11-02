@@ -246,6 +246,19 @@
         "default": 100,
         "hint": "上游默认 100KB，超过的不下载"
       },
+      "judge_emoji": {
+        "type": "bool",
+        "description": "启用表情包判断",
+        "default": false,
+        "hint": "开启后每张图第一次出现时交给模型判断是不是表情包；不是则不计数、不收藏，已计过的计数会被清掉。判断不了（模型报错）时按原逻辑处理"
+      },
+      "judge_provider": {
+        "type": "string",
+        "description": "表情判断用的模型",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空则用当前会话的对话模型；只有启用表情包判断时才生效"
+      },
       "max_per_group": {
         "description": "每群最多收藏",
         "type": "int",
