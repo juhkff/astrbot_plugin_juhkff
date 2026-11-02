@@ -93,7 +93,7 @@ data/plugin_data/astrbot_plugin_juhkff/
   `wake_prefix`，默认 `/`）开头的消息、以及 `@全体` 这类「被唤醒但不是在叫它」的消息
   按指令处理，不记录也不回复，避免和 `/juhkff`、`#帮助` 抢；`use_context + max_history_length` 决定带多少条上下文；
   `persona_prompt` 就是人设（system 内容，支持 `{{botName}}`；配置页里点编辑器右上角可全屏编辑）；`attach_url_analysis`
-  会先抓消息里链接的正文；图片两头都带：
+  会先抓消息里链接的正文（长度由 `url_content_chars` 控制，默认 400 字/链接），作为独立的参考消息交给模型，不拼进群友原话；图片两头都带：
   - 当前回合的图经 `image_urls` 直接给多模态模型看；
   - 历史里的图以 `ImageURLPart` 跟着 `contexts` 一起传（只存 http(s) 地址，不落
     base64），所以在 `max_history_length` 窗口内，模型能回看前面几轮的图；本地

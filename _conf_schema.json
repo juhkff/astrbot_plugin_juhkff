@@ -151,6 +151,17 @@
         "default": false,
         "hint": "先抓消息里链接的正文，再让模型接话"
       },
+      "url_content_chars": {
+        "description": "链接正文长度（字）",
+        "type": "int",
+        "default": 400,
+        "slider": {
+          "min": 100,
+          "max": 2000,
+          "step": 100
+        },
+        "hint": "每个链接最多带多少字正文；只作为独立参考消息交给模型，不拼进群友原话"
+      },
       "persona_prompt": {
         "description": "人设提示词",
         "type": "text",
