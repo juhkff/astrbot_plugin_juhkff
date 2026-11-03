@@ -52,7 +52,7 @@ ANILIST_URL = "https://graphql.anilist.co"
 _ANILIST_QUERY = (
     "query($from:Int,$to:Int){Page(perPage:20){airingSchedules("
     "airingAt_greater:$from,airingAt_lesser:$to,sort:TIME){episode airingAt "
-    "media{title{native romaji} coverImage{large}}}}}"
+    "media{title{native romaji} coverImage{large extraLarge}}}}}"
 )
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -238,7 +238,7 @@ class DailyReportModule(BaseModule):
         )
         today = date.today()
         return {
-            "hitokoto": hitokoto if isinstance(hitokoto, str) and hitokoto else "人生如逆旅，我亦是行人",
+            "hitokoto": hitokoto if isinstance(hitokoto, str) else "",
             "six": six if isinstance(six, list) else [],
             "bili": bili if isinstance(bili, list) else [],
             "it": it if isinstance(it, list) else [],
@@ -379,9 +379,11 @@ class DailyReportModule(BaseModule):
             if not name or name in seen:
                 continue
             seen.add(name)
-            items.append(
-                {"name": name, "image": str((media.get("coverImage") or {}).get("large") or "")}
-            )
+            covers = media.get("coverImage") or {}
+            image = covers.get("extraLarge") or covers.get("large") or ""
+            if not self.cfg.get("hd_cover", True):
+                image = covers.get("large") or image
+            items.append({"name": name, "image": str(image)})
             if len(items) >= 8:
                 break
         return items

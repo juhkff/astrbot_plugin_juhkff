@@ -87,6 +87,7 @@
             {% endif %} {% endfor %}
           </ul>
         </div>
+        {% if data.data_hitokoto %}
         <div class="five-border">
           <div class="moyu-title" style="left: -3px">
             <img src="./res/icon/hitokoto.png" class="title-img" />今日一言
@@ -95,6 +96,7 @@
             “{{data.data_hitokoto}}”
           </p>
         </div>
+        {% endif %}
       </div>
     </div>
   </body>

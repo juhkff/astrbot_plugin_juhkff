@@ -455,6 +455,12 @@
           "step": 30
         },
         "hint": "提前生成失败（接口超时、图渲染失败）时，每隔这么久重试一次，最多 5 次；对齐原插件的 preHandleRetryInterval"
+      },
+      "hd_cover": {
+        "description": "番剧封面用高清图",
+        "type": "bool",
+        "default": true,
+        "hint": "用 AniList 的 extraLarge 封面（460×650）；关掉用 large（230×320），体积更小"
       }
     }
   },
