@@ -22,7 +22,7 @@ import base64
 import html
 import re
 import xml.etree.ElementTree as ET
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ from .common import (
     BaseModule,
     PluginLike,
     data_dir,
+    get_tz,
     resolve_umo,
     save_temp_image,
 )
@@ -46,12 +47,17 @@ ALAPI_URL = "https://v2.alapi.cn/api/zaobao"
 SIX_URL = "https://60s-api.viki.moe/v2/60s"
 BILI_URL = "https://s.search.bilibili.com/main/hotword"
 IT_URL = "https://www.ithome.com/rss/"
-ANIME_URL = "https://api.bgm.tv/calendar"
+ANILIST_URL = "https://graphql.anilist.co"
+# 今日播出的番剧：按本机时区的「今天」取 airingAt 区间
+_ANILIST_QUERY = (
+    "query($from:Int,$to:Int){Page(perPage:20){airingSchedules("
+    "airingAt_greater:$from,airingAt_lesser:$to,sort:TIME){episode airingAt "
+    "media{title{native romaji} coverImage{large}}}}}"
+)
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120 Safari/537.36"
 )
-_WEEK = "日一二三四五六"
 _ITEM_RE = re.compile(r"<item>.*?<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", re.S)
 
 # 只放公历固定的节日；农历节日（春节/端午/中秋）每年日期不同，不硬编码
@@ -64,8 +70,28 @@ _FIXED_HOLIDAYS = [
 ]
 
 
-def _weekday_cn(day: date) -> str:
-    return f"星期{_WEEK[day.weekday() + 1 if day.weekday() < 6 else 0]}"
+_CN_NUM = "〇一二三四五六七八九十"
+
+
+def _cn_num(n: int) -> str:
+    """1..31 的中文写法：十一、二十、三十一。"""
+    if n <= 10:
+        return _CN_NUM[n]
+    if n < 20:
+        return "十" + _CN_NUM[n - 10]
+    if n % 10 == 0:
+        return _CN_NUM[n // 10] + "十"
+    return _CN_NUM[n // 10] + "十" + _CN_NUM[n % 10]
+
+
+def _week_short(day: date) -> str:
+    """模板右上角只能放两个字：周一…周日。"""
+    return "周" + "一二三四五六日"[day.weekday()]
+
+
+def _zh_date(day: date) -> str:
+    """十一月三日：模板一行 15px，写不下「2026年11月3日」。"""
+    return f"{_cn_num(day.month)}月{_cn_num(day.day)}日"
 
 
 class DailyReportModule(BaseModule):
@@ -218,9 +244,9 @@ class DailyReportModule(BaseModule):
             "it": it if isinstance(it, list) else [],
             "anime": anime if isinstance(anime, list) else [],
             "festivals": _festivals(today),
-            "week": _weekday_cn(today),
+            "week": _week_short(today),
             "date": today.strftime("%Y-%m-%d"),
-            "zh_date": f"{today.year}年{today.month}月{today.day}日",
+            "zh_date": _zh_date(today),
             "full_show": bool(self.cfg.get("daily_report_full_show", True)),
         }
 
@@ -237,6 +263,23 @@ class DailyReportModule(BaseModule):
                 if fmt == "json":
                     return await resp.json(content_type=None)
                 return await resp.text(errors="ignore")
+
+    async def _post_json(
+        self, url: str, payload: dict[str, Any], *, timeout_sec: float = 20
+    ) -> Any:
+        """带 UA / 代理的 POST JSON（AniList 用 GraphQL，必须 POST）。"""
+        timeout = aiohttp.ClientTimeout(total=timeout_sec)
+        kwargs: dict[str, Any] = {
+            "headers": {"User-Agent": UA, "Content-Type": "application/json"},
+            "json": payload,
+        }
+        if self.proxy:
+            kwargs["proxy"] = self.proxy
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, **kwargs) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status} {url}")
+                return await resp.json(content_type=None)
 
     async def _hitokoto(self) -> str:
         try:
@@ -307,27 +350,41 @@ class DailyReportModule(BaseModule):
             titles = [html.unescape(t.strip()) for t in _ITEM_RE.findall(text)]
         return [t for t in titles if t][:10]
 
+    def _today_window(self) -> tuple[int, int]:
+        """本机时区「今天」的 [00:00, 次日 00:00) 时间戳。"""
+        tz = get_tz(self.plugin.config.get("global", {}).get("timezone") or None)
+        start = datetime.combine(date.today(), time.min, tzinfo=tz)
+        end = start + timedelta(days=1)
+        return int(start.timestamp()), int(end.timestamp())
+
     async def _anime(self) -> list[dict[str, str]]:
+        """今日新番：AniList 的每日放送（bgm.tv 在这台机器上 API 和图床都不通）。"""
+        start, end = self._today_window()
         try:
-            data = await self._get(ANIME_URL, timeout_sec=12)
+            data = await self._post_json(
+                ANILIST_URL,
+                {"query": _ANILIST_QUERY, "variables": {"from": start, "to": end}},
+                timeout_sec=15,
+            )
         except Exception:
-            logger.warning("[juhkff] 日报：番剧日历获取失败")
+            logger.warning("[juhkff] 日报：番剧时间表获取失败")
             return []
-        cn = _weekday_cn(date.today())
-        for day in data or []:
-            if ((day.get("weekday") or {}).get("cn")) != cn:
+        rows = ((data or {}).get("data") or {}).get("Page", {}).get("airingSchedules") or []
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            media = row.get("media") or {}
+            title = media.get("title") or {}
+            name = str(title.get("native") or title.get("romaji") or "").strip()
+            if not name or name in seen:
                 continue
-            items = []
-            for row in (day.get("items") or [])[:8]:
-                images = row.get("images") or {}
-                items.append(
-                    {
-                        "name": str(row.get("name_cn") or row.get("name") or ""),
-                        "image": str(images.get("large") or images.get("common") or ""),
-                    }
-                )
-            return items
-        return []
+            seen.add(name)
+            items.append(
+                {"name": name, "image": str((media.get("coverImage") or {}).get("large") or "")}
+            )
+            if len(items) >= 8:
+                break
+        return items
 
     # ------------------------------------------------------------ 渲染
 
