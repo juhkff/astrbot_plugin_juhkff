@@ -70,28 +70,20 @@ _FIXED_HOLIDAYS = [
 ]
 
 
-_CN_NUM = "〇一二三四五六七八九十"
-
-
-def _cn_num(n: int) -> str:
-    """1..31 的中文写法：十一、二十、三十一。"""
-    if n <= 10:
-        return _CN_NUM[n]
-    if n < 20:
-        return "十" + _CN_NUM[n - 10]
-    if n % 10 == 0:
-        return _CN_NUM[n // 10] + "十"
-    return _CN_NUM[n // 10] + "十" + _CN_NUM[n % 10]
-
-
 def _week_short(day: date) -> str:
-    """模板右上角只能放两个字：周一…周日。"""
-    return "周" + "一二三四五六日"[day.weekday()]
+    """模板右上角只有一个大字的空位，上游传的就是单个字：日/一/…/六。"""
+    return "日一二三四五六"[(day.weekday() + 1) % 7]
 
 
 def _zh_date(day: date) -> str:
-    """十一月三日：模板一行 15px，写不下「2026年11月3日」。"""
-    return f"{_cn_num(day.month)}月{_cn_num(day.day)}日"
+    """农历日期，形如「九月廿五」（对齐上游 lunar-javascript 的 getMonthInChinese）。"""
+    try:
+        from lunar_python import Solar
+    except ImportError:  # 依赖没装上就留空，模板会隐藏这一行
+        logger.warning("[juhkff] 日报：缺 lunar-python，农历日期留空")
+        return ""
+    lunar = Solar.fromYmd(day.year, day.month, day.day).getLunar()
+    return f"{lunar.getMonthInChinese()}月{lunar.getDayInChinese()}"
 
 
 class DailyReportModule(BaseModule):

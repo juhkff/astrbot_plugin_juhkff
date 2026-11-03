@@ -8,5 +8,6 @@ playwright>=1.40.0
 # 不装也能用 backend=web（纯 aiohttp + PHPSESSID）
 # pixivpy3>=3.7.5
 
-# 主动群聊历史存储（不装则自动退回内存）
+# 主动群聊历史存储（不装则无法记录历史）
 redis>=5.0.0
+lunar-python>=1.3.0

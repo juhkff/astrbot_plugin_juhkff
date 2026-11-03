@@ -93,7 +93,9 @@ data/plugin_data/astrbot_plugin_juhkff/
   `60s-api.viki.moe` 的 60 秒新闻、`s.search.bilibili.com` 热搜、IT 之家 RSS、
   `api.bgm.tv/calendar` 当日番剧，加公历节日与周末倒数；**出图模板直接沿用上游**
   `resources/daily_report/`（「真寻日报 / MAHIRO NEWS」那套，含图标与背景图，共 184K），
-  CSS 与图片在加载时内联成 data URI，标题手写体只保留「真寻日报」4 个字（subset 后 2KB），
+  CSS 与图片在加载时内联成 data URI，标题手写体只保留「真寻日报」4 个字（subset 后 2KB）；
+  日期块按上游格式：单字星期 + 公历 + 农历（`lunar-python`），番剧封面默认取 AniList 的
+  `extraLarge`（`hd_cover` 可关）；
   正文用系统里的中文字体（本机需装 Noto Sans SC / 文泉驿等，否则中文会显示成方框）。
   用**本机 Chromium** 渲染（约 2 秒，HTML 不出机器）；渲染失败直接回「日报生成失败」，
   不再退回文字版。`#日报` 即时生成，`push_hour`/`push_minute` 定时推送（配置页是滑块）。
