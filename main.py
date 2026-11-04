@@ -40,6 +40,7 @@ from juhkff_modules.daily_report import DailyReportModule  # noqa: E402
 from juhkff_modules.emoji_steal import EmojiStealModule  # noqa: E402
 from juhkff_modules.help_gen import HelpGenModule  # noqa: E402
 from juhkff_modules.pixiv_push import PixivPushModule  # noqa: E402
+from juhkff_modules.renderer import renderer as html_renderer  # noqa: E402
 from juhkff_modules.share_parse import ShareParseModule  # noqa: E402
 
 from astrbot.api import AstrBotConfig, logger  # noqa: E402
@@ -137,64 +138,83 @@ class JuhkffPlugin(Star):
         )
 
     async def terminate(self) -> None:
-        """插件卸载 / AstrBot 退出时调用：先停模块，再注销定时任务。"""
-        for mod in self.modules.values():
-            try:
-                await mod.stop()
-            except Exception:
-                logger.exception(f"[juhkff] 模块 {mod.key} 停止时出错")
-        await self.scheduler.shutdown()
-        # 本地渲染器会常驻一个 Chromium 进程，卸载时一起关掉
+        """Stop modules and release jobs and browser resources on every exit path."""
         try:
-            from .juhkff_modules.renderer import renderer as html_renderer
-
-            await html_renderer.close()
-        except Exception:
-            logger.exception("[juhkff] 关闭本地渲染器失败")
-        logger.info("[juhkff] 已卸载")
+            for mod in self.modules.values():
+                try:
+                    await mod.stop()
+                except Exception:
+                    logger.exception("[juhkff] Module %s failed to stop", mod.key)
+        finally:
+            try:
+                await self.scheduler.shutdown()
+            finally:
+                # Keep the bound renderer reachable after a module-cache reload.
+                try:
+                    await html_renderer.close()
+                except Exception:
+                    logger.exception("[juhkff] Failed to close the local renderer")
+        logger.info("[juhkff] Plugin unloaded")
 
     # ------------------------------------------------------------ 消息分发
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def _dispatch(self, event: AstrMessageEvent) -> AsyncGenerator[None, None]:
-        """收到任意消息就分发给所有启用的模块。
+        """Route commands before passive handlers and active chat.
 
-        规则：
-        - `intercepts()` 为真的模块（多轮交互）独占当前会话，其它模块本轮不参与，
-          避免把用户的补充输入截走；
-        - 否则所有启用的模块依次 `handle()`，谁返回了消息链就由这里直接发出去。
+        Args:
+            event: Incoming message after AstrBot's wake and command checks.
 
-        为什么不用 `yield chain`：框架的 `call_handler` 只认 `MessageEventResult`
-        （会 `event.set_result`），原样 yield 一个 `MessageChain` 没有任何阶段消费，
-        消息不会真的发出去。这里改成 `await event.send(chain)` 立即发送，并
-        `event.stop_event()` 结束事件——否则被 @ / 唤醒前缀触发的消息还会继续走
-        框架自带的对话链路，用核心的人设再回一遍。
+        Yields:
+            Control to AstrBot when no module consumes the message.
         """
-        if not self.global_enabled:
+        if not self.global_enabled or event.is_stopped():
             return
-        # 热重载后钩子不会再触发，这里兜底把模块拉起来（幂等，只在第一次真正执行）
         await self._ensure_started()
+        # The framework populates this map before invoking any handlers, even
+        # for commands without arguments. Leave those commands to their owner.
+        if event.get_extra("handlers_parsed_params"):
+            return
         enabled = [mod for mod in self.modules.values() if mod.enabled]
         exclusive = [mod for mod in enabled if mod.intercepts(event)]
-        sent = False
+        # Observe eligible conversations before another automatic module consumes
+        # the event. Command messages remain outside history and reply generation.
+        chat = self.modules.get("active_chat")
+        if (
+            not exclusive
+            and chat is not None
+            and isinstance(chat, ActiveChatModule)
+            and chat.enabled
+        ):
+            try:
+                await chat.observe(event)
+            except Exception:
+                logger.exception("[juhkff] Failed to record incoming chat history")
+        enabled.sort(key=lambda mod: mod.key == "active_chat")
         for mod in exclusive or enabled:
             if not mod.enabled:
                 continue
             try:
                 chain = await mod.handle(event)
             except Exception:
-                # 单个模块出错只记日志，不能影响其它模块和这条消息
-                logger.exception(f"[juhkff] 模块 {mod.key} 处理消息出错")
+                logger.exception(
+                    f"[juhkff] Module {mod.key} failed to handle a message"
+                )
+                if exclusive or event.is_stopped():
+                    event.stop_event()
+                    return
                 continue
             if chain is None:
+                # A command can finish silently; active chat sends its own reply.
+                # Neither case should fall through to another responder.
+                if exclusive or event.is_stopped():
+                    event.stop_event()
+                    return
                 continue
             try:
                 await event.send(chain)
-                sent = True
             except Exception:
-                logger.exception(f"[juhkff] 模块 {mod.key} 发送消息失败")
-        if sent:
-            # 已经有模块回过话，结束事件，别再让框架的 LLM 用核心人设补一句
+                logger.exception(f"[juhkff] Module {mod.key} failed to send a message")
             event.stop_event()
             return
         yield
@@ -202,7 +222,9 @@ class JuhkffPlugin(Star):
     # ------------------------------------------------------------ 指令
 
     @filter.command("juhkff")
-    async def _cmd_status(self, event: AstrMessageEvent) -> AsyncGenerator[MessageEventResult, None]:
+    async def _cmd_status(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
         """`/juhkff`：查看总开关、数据目录和每个模块的启停状态。"""
         lines = [
             f"【juhkff 综合插件】v{VERSION}",

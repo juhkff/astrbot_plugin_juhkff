@@ -4,9 +4,8 @@ pillow>=10.0.0
 # 日报/帮助图的本地渲染（装完还要 playwright install chromium）
 playwright>=1.40.0
 
-# 可选：Pixiv 的 app 后端（backend=app 时才需要）
-# 不装也能用 backend=web（纯 aiohttp + PHPSESSID）
-# pixivpy3>=3.7.5
+# Pixiv uses AstrBot's aiohttp and Pillow; no Pixiv SDK or login is required.
+# psutil is provided by AstrBot and identifies process restarts.
 
 # 主动群聊历史存储（不装则无法记录历史）
 redis>=5.0.0

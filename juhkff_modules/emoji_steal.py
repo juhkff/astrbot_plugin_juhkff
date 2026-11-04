@@ -1,19 +1,8 @@
-"""偷表情：行为对齐上游 `src/apps/emojiSave.ts`。
+"""Collect repeated group images and send them with one configured probability.
 
-原则和上游一致：不判断「这张图像不像表情」，而是看群友怎么用——同一张图
-在 `expire_hours`（默认 72 小时）内被同一个群发过第二次，就认为它被当成表情在
-用，落盘收藏。
-
-与之前的实现相比的差异：
-
-- 图库按群隔离（`emoji/<群号>/`），上游也是按 `group_id` 建目录；
-- 用 sha256 而不是文件名判定同一张图，改名重发也能认出来；
-- 单张上限从 2MB 收紧到上游的 100KB（表情一般都很小）；
-- 每组最多 50 张，超出删最旧的（上游是随机删一张）；
-- 每次群消息都会按 `default_emoji_rate` / 分群配置掷骰子，决定要不要随机
-  发一张已收藏的表情（上游是先在 reply_rate 命中后再按 emoji_rate 抽）；
-- 可选「启用表情包判断」：交给对话模型判断这张图是不是表情包，不是就不参与
-  计数（已有的计数一并清掉），避免把截图、照片误收进图库。
+Images are identified by SHA-256 within each group. The defaults are a 72-hour
+repeat window, a 2 MB image limit (1 MB = 1024**2 bytes), and 30 saved images per
+group. Model judging is optional and requires an explicitly configured provider.
 """
 
 from __future__ import annotations
@@ -21,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import random
+import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +24,7 @@ from .common import BaseModule, PluginLike, data_dir, load_json, save_json, subd
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
-# 「是不是表情包」的判断提示词：要求模型只回一个「是」或「否」
+# Ask for a yes/no verdict without additional explanation.
 _JUDGE_PROMPT = "这张图片是不是表情包（贴纸 / sticker，用于聊天中表达语气或玩梗）？只回答「是」或「否」，不要加标点或解释。"
 
 _MAGIC = (
@@ -61,24 +52,23 @@ class EmojiStealModule(BaseModule):
         self._root: Path | None = None
         self._index_path: Path | None = None
         self._prints_path: Path | None = None
-        # 群号 -> {sha256: {"file", "saved_at", "umo"}}，即「已收藏」图库
+        # Group ID -> SHA-256 -> saved gallery metadata.
         self._index: dict[str, dict[str, dict[str, Any]]] = {}
-        # 群号 -> {sha256: {"first": ts}}，指「第一次见到这张图」的时间，
-        # 用来判断它是否在 expire_hours 窗口内又被发了一次
+        # Group ID -> SHA-256 -> first-seen timestamp and optional verdict.
         self._prints: dict[str, dict[str, dict[str, float]]] = {}
         self._lock = asyncio.Lock()
         self._rng = random.SystemRandom()
-        # 本地表情包文件夹的扫描缓存
+        # Cache scans of the configured local gallery.
         self._gallery: list[Path] | None = None
         self._gallery_at = 0.0
 
     def help_entries(self):
         return [("（自动）", "同一张图被反复发送时自动收藏，并按配置概率随机发出")]
 
-    # ------------------------------------------------------------ 生命周期
+    # ------------------------------------------------------------ Lifecycle
 
     async def start(self) -> None:
-        """加载图库索引与指纹表，并清掉过期 / 文件已丢的条目。"""
+        """Load saved state and prune expired fingerprints and missing files."""
         self._root = subdir("emoji")
         self._index_path = data_dir() / "emoji_index.json"
         self._prints_path = data_dir() / "fingerprints.json"
@@ -86,8 +76,8 @@ class EmojiStealModule(BaseModule):
         self._prints = load_json(self._prints_path, {}) or {}
         await asyncio.to_thread(self._prune)
         logger.info(
-            f"[juhkff] 偷表情已就绪：{len(self._index)} 个群、"
-            f"共 {sum(len(v) for v in self._index.values())} 张"
+            f"[juhkff] Emoji collection ready: {len(self._index)} groups, "
+            f"{sum(len(v) for v in self._index.values())} images"
         )
 
     async def stop(self) -> None:
@@ -99,37 +89,42 @@ class EmojiStealModule(BaseModule):
         if self._prints_path is not None:
             save_json(self._prints_path, self._prints)
 
-    # ------------------------------------------------------------ 配置
+    # ------------------------------------------------------------ Configuration
 
     @property
     def _expire(self) -> float:
-        """「同一张图」的认定窗口，单位秒；配置按小时填，0 表示永不过期。"""
+        """Return the repeat window in seconds; zero means no expiration."""
         if "expire_hours" in self.cfg:
             return max(0.0, float(self.cfg.get("expire_hours") or 0)) * 3600
-        # 兼容旧配置：expire_sec（秒），默认 3 天
+        # Preserve the legacy seconds setting; the default remains three days.
         return float(self.cfg.get("expire_sec", 259200) or 259200)
 
     @property
     def _size_limit(self) -> int:
-        """单张图大小上限（字节），默认 100KB，超过直接忽略。"""
-        return int(float(self.cfg.get("size_limit_kb", 100) or 100) * 1024)
+        """Return the image size limit in bytes, defaulting to 2 MB."""
+        return int(float(self.cfg.get("size_limit_mb", 2) or 2) * 1024**2)
 
     @property
     def _max_per_group(self) -> int:
-        return max(1, int(self.cfg.get("max_per_group", 50) or 50))
+        return max(1, int(self.cfg.get("max_per_group", 30) or 30))
 
     @property
     def _judge_enabled(self) -> bool:
-        """是否让模型判断「这张图是不是表情包」。"""
-        return bool(self.cfg.get("judge_emoji", False))
+        """Return whether judging has both permission and an explicit provider."""
+        return bool(self.cfg.get("judge_emoji", True)) and bool(
+            str(self.cfg.get("judge_provider") or "").strip()
+        )
 
-    def _rates(self, group_key: str, umo: str) -> tuple[float, float]:
-        """返回 (接话概率, 接话时发表情概率)。
+    def _rates(self, group_key: str, umo: str) -> float:
+        """Return the emoji probability, honoring a group ID or origin override.
 
-        分群配置支持两种写法：dict `{群号: {reply_rate, emoji_rate}}`，
-        或 template_list `[{groups: [...], reply_rate, emoji_rate}]`。
+        Args:
+            group_key: Group ID used by dictionary or template-list rules.
+            umo: Full message origin accepted as an alternative rule key.
+
+        Returns:
+            The configured emoji probability for either gallery source.
         """
-        reply = float(self.cfg.get("default_reply_rate", 0.1) or 0)
         emoji = float(self.cfg.get("default_emoji_rate", 0.2) or 0)
 
         rules = self.cfg.get("group_rates") or {}
@@ -143,47 +138,48 @@ class EmojiStealModule(BaseModule):
                     rule = item
                     break
         if isinstance(rule, dict):
-            if rule.get("reply_rate") is not None:
-                reply = float(rule["reply_rate"])
             if rule.get("emoji_rate") is not None:
                 emoji = float(rule["emoji_rate"])
-        return reply, emoji
+        return emoji
 
-    # ------------------------------------------------------------ 消息
+    # ------------------------------------------------------------ Messages
 
     async def handle(self, event: AstrMessageEvent) -> MessageChain | None:
         umo = event.unified_msg_origin or ""
-        # umo 不是 `平台:类型:群号` 格式（比如私聊）就跳过
-        if self._group_key(umo) == umo:
+        if not isinstance(umo, str):
             return None
-        if not self._is_group(event):
-            return None
-
+        # Validate the raw identity without rewriting probability or index keys.
         group_key = self._group_key(umo)
-        reply_rate, emoji_rate = self._rates(group_key, umo)
+        if (
+            group_key == umo
+            or not self._is_group(event)
+            or self._gallery_dir(group_key) is None
+        ):
+            return None
 
-        # 先做收藏（不管本回合说不说话，图都可能被收藏）
+        emoji_rate = self._rates(group_key, umo)
+
+        # Collect before checking whether to send, including at probability zero.
         try:
             await self._collect(event, group_key, umo)
         except Exception:
-            logger.exception("[juhkff] 偷表情：收藏失败")
+            logger.exception("[juhkff] Emoji collection failed")
 
-        # 先掷「要不要说话」，再掷「发不发偷到的图」；和上游一致：
-        # 偷到的图没命中或本群还没有收藏时，回落到本地表情包文件夹
-        if self._rng.random() >= reply_rate:
+        # One probability check governs both stolen and local images.
+        if self._rng.random() >= emoji_rate:
             return None
         path: Path | None = None
         source = ""
         stolen = self._gallery_files(group_key)
-        if stolen and self._rng.random() < emoji_rate:
-            path, source = self._rng.choice(stolen), "偷到的表情"
+        if stolen:
+            path, source = self._rng.choice(stolen), "collected gallery"
         if path is None:
             local = self._local_gallery()
             if not local:
                 return None
-            path, source = self._rng.choice(local), "本地图库的表情"
+            path, source = self._rng.choice(local), "local gallery"
         await asyncio.sleep(self._rng.uniform(0.0, 1.5))
-        logger.info(f"[juhkff] 发送{source}：{path}")
+        logger.info(f"[juhkff] Sending image from {source}: {path}")
         return MessageChain().file_image(str(path))
 
     @staticmethod
@@ -191,20 +187,71 @@ class EmojiStealModule(BaseModule):
         try:
             return event.get_message_type().value == "GroupMessage"
         except Exception:
-            return True
+            return False
 
     def _group_key(self, umo: str) -> str:
-        parts = umo.split(":")
-        return parts[2] if len(parts) >= 3 else umo
+        parts = umo.split(":", 2)
+        return parts[2] if len(parts) == 3 and parts[0] and parts[1] else umo
 
-    def _gallery_dir(self, group_key: str) -> Path:
-        return (self._root or data_dir() / "emoji") / group_key
+    def _gallery_dir(self, group_key: str) -> Path | None:
+        """Validate a group component and its resolved storage boundary.
+
+        Args:
+            group_key: Raw group ID, also used unchanged by rules and metadata.
+
+        Returns:
+            An absolute group directory, or None for unsafe IDs or symlinks.
+        """
+        if (
+            not isinstance(group_key, str)
+            or group_key in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9_.@-]+", group_key)
+        ):
+            return None
+        try:
+            root = self._root or data_dir() / "emoji"
+            if root.is_symlink():
+                return None
+            root = root.resolve()
+            directory = root / group_key
+            if directory.is_symlink() or directory.resolve().parent != root:
+                return None
+            return directory
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _gallery_path(self, group_key: str, filename: Any) -> Path | None:
+        """Validate an image filename within one group's storage boundary.
+
+        Args:
+            group_key: Raw group ID identifying the containing directory.
+            filename: Persisted or generated single-component filename.
+
+        Returns:
+            A contained absolute image path, or None for unsafe paths or symlinks.
+        """
+        directory = self._gallery_dir(group_key)
+        if (
+            directory is None
+            or not isinstance(filename, str)
+            or filename in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9_.@-]+", filename)
+        ):
+            return None
+        try:
+            path = directory / filename
+            if path.is_symlink() or path.resolve().parent != directory:
+                return None
+            return path
+        except (OSError, RuntimeError, ValueError):
+            return None
 
     def _local_gallery(self) -> list[Path]:
-        """扫描配置里的本地表情包文件夹（60 秒缓存，方便随时往里丢图）。
+        """Scan the local gallery, caching results for 60 seconds.
 
-        路径可以是绝对路径；相对路径以插件数据目录为基准。没有该文件夹时
-        会自动创建，省得用户先手动建。
+        Returns:
+            Image paths under the configured absolute path or data-relative path.
+            A missing gallery directory is created automatically.
         """
         raw = str(self.cfg.get("gallery_path") or "").strip()
         if not raw:
@@ -224,28 +271,38 @@ class EmojiStealModule(BaseModule):
             try:
                 base.mkdir(parents=True, exist_ok=True)
             except OSError:
-                logger.warning(f"[juhkff] 本地表情包目录建不出来：{base}")
+                logger.warning(
+                    f"[juhkff] Cannot create local gallery directory: {base}"
+                )
         self._gallery = files
         self._gallery_at = now
         return files
 
     def _gallery_files(self, group_key: str) -> list[Path]:
         index = self._index.get(group_key) or {}
+        if not isinstance(index, dict):
+            return []
         files = []
         for info in index.values():
-            path = self._gallery_dir(group_key) / str(info.get("file", ""))
-            if path.exists():
+            if not isinstance(info, dict):
+                continue
+            path = self._gallery_path(group_key, info.get("file"))
+            if path is not None and path.is_file():
                 files.append(path)
         return files
 
-    # ------------------------------------------------------------ 收藏
+    # ------------------------------------------------------------ Collection
 
     async def _collect(self, event: AstrMessageEvent, group_key: str, umo: str) -> None:
-        """核心：同一张图在窗口内第二次出现才收藏。
+        """Collect an image on its second sighting within the repeat window.
 
-        流程：取图片段 → 转本地文件 → 过滤超大图 → sha256 指纹 →
-        首次见到只记时间；窗口内再次见到就落盘并加入图库索引。
+        Args:
+            event: Incoming group event containing image components.
+            group_key: Group ID used to isolate saved images and fingerprints.
+            umo: Full message origin recorded with saved images.
         """
+        if self._gallery_dir(group_key) is None:
+            return
         segments = self._image_segments(event)
         if not segments:
             return
@@ -254,11 +311,10 @@ class EmojiStealModule(BaseModule):
         changed = False
         for seg in segments:
             try:
-                # 注意：convert_to_file_path 是 async 方法（内部自己判断 URL/本地/Base64
-                # 并下载），不能丢进 to_thread，否则拿到的是未 await 的协程对象
+                # Conversion is asynchronous and handles URLs, local files, and Base64.
                 local = await seg.convert_to_file_path()
             except Exception as exc:
-                self.debug(f"[juhkff] 表情图片转存失败: {exc}")
+                self.debug(f"[juhkff] Emoji image conversion failed: {exc}")
                 continue
             path = Path(str(local))
             try:
@@ -274,52 +330,68 @@ class EmojiStealModule(BaseModule):
 
             digest = hashlib.sha256(data).hexdigest()
 
-            # 已收藏的直接跳过，不浪费一次模型调用
+            # Skip saved images without another model call.
             async with self._lock:
                 if digest in (self._index.get(group_key) or {}):
                     continue
                 record = (self._prints.get(group_key) or {}).get(digest)
 
-            # 第一次见到这张图时，可选地让模型判断是不是表情包。
-            # 判断放在锁外：网络请求很慢，不能堵住别的图片处理。
+            # Reuse positive verdicts within the repeat window; judge outside the lock.
+            if (
+                record
+                and self._expire > 0
+                and now - float(record.get("first", 0)) > self._expire
+            ):
+                record = None
             judged: bool | None = None
-            if self._judge_enabled and not (record and record.get("emoji")):
-                judged = await self._judge(path, umo)
+            if self._judge_enabled:
+                if not (record and record.get("emoji")):
+                    judged = await self._judge(path, umo)
                 if judged is False:
-                    # 不是表情包：不处理；如果之前已经计过数，把计数清掉
+                    # Reject this sighting and clear any existing repeat count.
                     async with self._lock:
                         prints = self._prints.get(group_key) or {}
                         if prints.pop(digest, None) is not None:
                             changed = True
                             logger.info(
-                                f"[juhkff] 判为表情包：否，清除 {digest[:8]} 的计数"
+                                f"[juhkff] Image rejected as emoji; cleared {digest[:8]}"
                             )
                     continue
 
             async with self._lock:
                 group_index = self._index.setdefault(group_key, {})
-                if digest in group_index:  # 并发下可能已被别的消息收藏
+                # Another event may have saved this image concurrently.
+                if digest in group_index:
                     continue
 
                 prints = self._prints.setdefault(group_key, {})
                 record = prints.get(digest)
-                if record is None or now - float(record.get("first", 0)) > self._expire:
+                if record is None or (
+                    self._expire > 0
+                    and now - float(record.get("first", 0)) > self._expire
+                ):
                     entry: dict[str, Any] = {"first": now}
                     if judged is True:
-                        # 记下来，第二次出现时不用再调一次模型
+                        # Reuse a positive verdict on the next sighting.
                         entry["emoji"] = True
                     prints[digest] = entry
                     changed = True
                     continue
 
-                # 窗口内第二次出现 → 收藏
+                # Save the second sighting within the repeat window.
                 directory = self._gallery_dir(group_key)
+                if directory is None:
+                    continue
                 directory.mkdir(parents=True, exist_ok=True)
-                target = directory / f"{digest[:16]}.{_guess_ext(data)}"
+                target = self._gallery_path(
+                    group_key, f"{digest[:16]}.{_guess_ext(data)}"
+                )
+                if target is None:
+                    continue
                 try:
                     await asyncio.to_thread(target.write_bytes, data)
                 except OSError as exc:
-                    logger.warning(f"[juhkff] 表情落盘失败: {exc}")
+                    logger.warning(f"[juhkff] Saving emoji image failed: {exc}")
                     continue
                 group_index[digest] = {
                     "file": target.name,
@@ -328,29 +400,27 @@ class EmojiStealModule(BaseModule):
                 }
                 prints.pop(digest, None)
                 changed = True
-                logger.info(f"[juhkff] 收藏表情 {target}（{size} 字节）")
+                logger.info(f"[juhkff] Collected emoji {target} ({size} bytes)")
                 self._trim_group(group_key)
 
         if changed:
             await asyncio.to_thread(self._save)
 
     async def _judge(self, path: Path, umo: str) -> bool | None:
-        """让模型判断一张图是不是表情包。
+        """Judge an image using only the explicitly configured provider.
 
-        返回 True（是）/ False（不是）/ None（判断不了，按未判断处理，
-        继续走原本的「重复出现即收藏」逻辑，避免模型故障时功能整体失效）。
+        Args:
+            path: Local image path to pass to the provider.
+            umo: Origin of the incoming event.
+
+        Returns:
+            A boolean verdict, or None when disabled, unconfigured, or unavailable.
+            Errors and timeouts preserve ordinary repeat-based collection.
         """
-        ctx = self.plugin.context
-        provider_id = str(self.cfg.get("judge_provider") or "")
-        if not provider_id:
-            try:
-                provider_id = await ctx.get_current_chat_provider_id(umo=umo)
-            except Exception as exc:
-                self.debug(f"[juhkff] 表情判断：取当前模型失败: {exc}")
-                provider_id = ""
-        if not provider_id:
-            self.debug("[juhkff] 表情判断：没有可用模型，跳过判断")
+        if not self._judge_enabled:
             return None
+        ctx = self.plugin.context
+        provider_id = str(self.cfg.get("judge_provider") or "").strip()
 
         try:
             resp = await asyncio.wait_for(
@@ -362,16 +432,16 @@ class EmojiStealModule(BaseModule):
                 timeout=20.0,
             )
         except Exception as exc:
-            self.debug(f"[juhkff] 表情判断失败（按未判断处理）: {exc}")
+            self.debug(f"[juhkff] Emoji judging failed; using repeat detection: {exc}")
             return None
 
         text = str(getattr(resp, "completion_text", "") or "").strip()
-        lowered = text.lower()
-        if text.startswith("是") or lowered.startswith(("yes", "true", "y")):
+        verdict = unicodedata.normalize("NFKC", text).casefold().strip(" \t\r\n。.!?")
+        if verdict in {"是", "yes", "true"}:
             return True
-        if text.startswith(("否", "不", "没")) or lowered.startswith(("no", "false", "n")):
+        if verdict in {"否", "no", "false"}:
             return False
-        self.debug(f"[juhkff] 表情判断返回无法识别的内容: {text[:30]}")
+        self.debug(f"[juhkff] Unrecognized emoji verdict: {text[:30]}")
         return None
 
     @staticmethod
@@ -383,35 +453,75 @@ class EmojiStealModule(BaseModule):
         return [seg for seg in chain if isinstance(seg, Image)]
 
     def _trim_group(self, group_key: str) -> None:
-        """超过每群上限时，按收藏时间从旧到新删。"""
+        """Remove the oldest safe gallery files above the per-group limit.
+
+        Args:
+            group_key: Raw group ID whose saved image count is being limited.
+        """
         index = self._index.get(group_key) or {}
-        if len(index) <= self._max_per_group:
+        if self._gallery_dir(group_key) is None or not isinstance(index, dict):
+            self._index.pop(group_key, None)
             return
-        ordered = sorted(index.items(), key=lambda kv: float(kv[1].get("saved_at", 0)))
-        for digest, info in ordered[: len(index) - self._max_per_group]:
-            path = self._gallery_dir(group_key) / str(info.get("file", ""))
+        ordered = []
+        for digest, info in list(index.items()):
+            if (
+                not isinstance(info, dict)
+                or self._gallery_path(group_key, info.get("file")) is None
+            ):
+                index.pop(digest, None)
+                continue
             try:
-                path.unlink()
-            except OSError:
-                pass
+                ordered.append((float(info.get("saved_at", 0)), digest, info))
+            except (TypeError, ValueError):
+                index.pop(digest, None)
+        ordered.sort(key=lambda item: item[0])
+        for _, digest, info in ordered[: max(0, len(index) - self._max_per_group)]:
+            path = self._gallery_path(group_key, info.get("file"))
+            if path is not None:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             index.pop(digest, None)
 
-    # ------------------------------------------------------------ 维护
+    # ------------------------------------------------------------ Maintenance
 
     def _prune(self) -> None:
-        """启动时清理：过期指纹、文件已丢失的索引项。"""
+        """Prune invalid metadata, expired fingerprints, and missing files."""
         now = time.time()
+        if not isinstance(self._prints, dict):
+            self._prints = {}
+        if not isinstance(self._index, dict):
+            self._index = {}
         for group_key, prints in list(self._prints.items()):
+            if self._gallery_dir(group_key) is None or not isinstance(prints, dict):
+                self._prints.pop(group_key, None)
+                continue
             for digest, record in list(prints.items()):
-                if now - float(record.get("first", 0)) > self._expire:
+                if not isinstance(record, dict):
+                    prints.pop(digest, None)
+                    continue
+                try:
+                    expired = (
+                        self._expire > 0
+                        and now - float(record.get("first", 0)) > self._expire
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    expired = True
+                if expired:
                     prints.pop(digest, None)
             if not prints:
                 self._prints.pop(group_key, None)
 
         for group_key, index in list(self._index.items()):
+            if self._gallery_dir(group_key) is None or not isinstance(index, dict):
+                self._index.pop(group_key, None)
+                continue
             for digest, info in list(index.items()):
-                path = self._gallery_dir(group_key) / str(info.get("file", ""))
-                if not path.exists():
+                path = self._gallery_path(
+                    group_key, info.get("file") if isinstance(info, dict) else None
+                )
+                if path is None or not path.is_file():
                     index.pop(digest, None)
             if not index:
                 self._index.pop(group_key, None)

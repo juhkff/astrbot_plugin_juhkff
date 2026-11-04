@@ -1,0 +1,108 @@
+* {
+    box-sizing:border-box
+}
+
+html,body {
+    margin:0;
+    padding:0
+}
+
+body {
+    font-family:'Noto Sans CJK SC','Noto Sans SC','Microsoft YaHei',sans-serif;
+    -webkit-font-smoothing:antialiased
+}
+
+a {
+    color:inherit;
+    text-decoration:none
+}
+
+h1,h2,h3,p,figure {
+    margin:0
+}
+
+h3 {
+    font-weight:500;
+    overflow-wrap:anywhere;
+    line-height:1.6
+}
+
+.news {
+    min-width:0
+}
+
+.story {
+    min-width:0
+}
+
+.news-photo {
+    display:block;
+    width:100%;
+    object-fit:cover
+}
+
+.meta {
+    display:flex;
+    flex-wrap:wrap;
+    gap:5px 12px;
+    align-items:center;
+    line-height:1.5;
+    font-size:12px
+}
+
+.source {
+    font-weight:500
+}
+
+.index,time,.mono {
+    font-family:'DejaVu Sans Mono',monospace
+}
+
+.holiday small {
+    display:block;
+    font-family:'DejaVu Sans Mono',monospace;
+    font-size:12px;
+    font-weight:400
+}
+
+.holiday-days span {
+    font-size:13px;
+    font-family:'Noto Sans CJK SC',sans-serif;
+    font-weight:400;
+    margin-left:5px
+}
+
+.kicker {
+    font-size:11px;
+    letter-spacing:2.3px
+}
+
+footer {
+    display:flex;
+    justify-content:space-between;
+    gap:20px;
+    font-size:11px;
+    line-height:1.8
+}
+
+footer span:last-child {
+    max-width:65%;
+    text-align:right
+}
+
+.serif {
+    font-family:'Noto Serif CJK SC','Songti SC',serif
+}
+
+img {
+    color:transparent
+}
+
+
+
+.empty {
+    padding:18px 0;
+    font-size:14px;
+    line-height:1.8;
+    opacity:.7
+}

@@ -1,0 +1,286 @@
+body {
+    background:#f1f2e9;
+    color:#224b43
+}
+
+.sheet {
+    padding:32px 38px 24px
+}
+
+.folio-top {
+    display:flex;
+    justify-content:space-between;
+    gap:20px;
+    font:10px 'DejaVu Sans Mono';
+    letter-spacing:1.3px;
+    border-top:5px solid #28564b;
+    border-bottom:1px solid #a7baab;
+    padding:11px 0
+}
+
+.folio-top span:nth-child(2) {
+    color:#81958a;
+    font-size:9px
+}
+
+.folio-mast {
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:33px 3px 27px
+}
+
+.folio-title .kicker {
+    font-size:12px;
+    letter-spacing:5px;
+    color:#6e8f7d
+}
+
+.folio-title h1 {
+    font-size:78px;
+    line-height:1.3;
+    letter-spacing:9px;
+    margin-top:8px;
+    font-weight:500
+}
+
+.folio-title h1 span {
+    display:inline-block;
+    font-size:29px;
+    font-weight:400;
+    writing-mode:vertical-rl;
+    letter-spacing:6px;
+    border-left:1px solid #9ab4a4;
+    padding-left:20px;
+    margin-left:13px;
+    vertical-align:4px
+}
+
+.foliodate {
+    text-align:right
+}
+
+.foliodate b {
+    font:58px 'DejaVu Sans Mono';
+    font-weight:400;
+    letter-spacing:-4px
+}
+
+.foliodate b span {
+    font-family:'Noto Serif CJK SC';
+    font-size:18px;
+    letter-spacing:0;
+    margin:0 11px 0 8px;
+    font-weight:400;
+    color:#789583
+}
+
+.foliodate p {
+    font-family:'Noto Serif CJK SC';
+    font-size:14px;
+    letter-spacing:2px;
+    margin-top:15px;
+    color:#708d7a
+}
+
+.folio-intro {
+    border-top:1px solid #7c9f8c;
+    border-bottom:1px solid #7c9f8c;
+    display:flex;
+    justify-content:space-between;
+    padding:12px 3px;
+    font-family:'Noto Serif CJK SC';
+    font-size:15px;
+    letter-spacing:4px
+}
+
+.folio-intro span+span {
+    font-family:'Noto Sans CJK SC';
+    font-size:11px;
+    letter-spacing:2px;
+    color:#8a9d88
+}
+
+.folio-cal {
+    display:flex;
+    align-items:center;
+    background:#e5eadc;
+    padding:18px 17px;
+    margin:23px 0 30px
+}
+
+.calcaption {
+    flex:none;
+    width:114px;
+    border-right:1px solid #a8b9a4;
+    margin-right:25px;
+    padding-right:20px
+}
+
+.calcaption>span {
+    display:block;
+    font-size:22px;
+    letter-spacing:4px
+}
+
+.calcaption small {
+    font:8px 'DejaVu Sans Mono';
+    letter-spacing:1.7px;
+    display:block;
+    margin-top:6px;
+    color:#84997c
+}
+
+.holidays {
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:24px;
+    flex:1
+}
+
+.holiday {
+    display:flex;
+    justify-content:space-between;
+    align-items:center
+}
+
+.holiday-name {
+    font-family:'Noto Serif CJK SC';
+    font-size:15px
+}
+
+.holiday small {
+    font-size:9px;
+    color:#8b9d81;
+    margin-top:3px
+}
+
+.holiday-days {
+    font:31px 'DejaVu Sans Mono';
+    color:#53765a;
+    white-space:nowrap
+}
+
+.holiday-days span {
+    font-size:10px
+}
+
+.folio-columns {
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:25px
+}
+
+.folio-column {
+    min-width:0
+}
+
+.folio-column+section {
+    padding-left:24px;
+    border-left:1px solid #bfcbb7
+}
+
+.folio-sectionhead {
+    padding-bottom:16px;
+    border-bottom:3px double #648b76;
+    position:relative;
+    margin-bottom:6px
+}
+
+.folio-sectionhead>span {
+    font:11px 'DejaVu Sans Mono';
+    color:#93aa90;
+    position:absolute;
+    right:0;
+    top:8px
+}
+
+.folio-sectionhead h2 {
+    font-size:32px;
+    font-weight:500;
+    letter-spacing:9px
+}
+
+.folio-sectionhead>div {
+    font:9px 'DejaVu Sans Mono';
+    letter-spacing:1.5px;
+    margin-top:12px;
+    color:#6c8e78;
+    display:flex;
+    justify-content:space-between
+}
+
+.folio-sectionhead b {
+    font-size:9px;
+    font-weight:400;
+    letter-spacing:0
+}
+
+.folio-item {
+    position:relative;
+    border-bottom:1px solid #ced7c4;
+    padding:16px 0 16px 22px
+}
+
+.folio-item .index {
+    position:absolute;
+    left:0;
+    top:21px;
+    font:10px 'DejaVu Sans Mono';
+    color:#8ca283
+}
+
+.folio-item h3 {
+    font-size:18px;
+    font-family:'Noto Serif CJK SC';
+    line-height:1.8;
+    font-weight:500
+}
+
+.folio-item .meta {
+    margin-top:10px;
+    color:#809176;
+    font-size:10px;
+    gap:4px 10px
+}
+
+.folio-item time {
+    font-size:9px
+}
+
+.folio-item.withphoto {
+    padding-left:0;
+    padding-top:14px
+}
+
+.withphoto>.index {
+    display:none
+}
+
+.withphoto img {
+    height:188px;
+    margin-bottom:14px;
+    filter:saturate(.78)
+}
+
+.tech .withphoto img {
+    object-fit:contain;
+    background:#e5e9df
+}
+
+.withphoto h3 {
+    font-size:20px;
+    font-weight:600
+}
+
+.withphoto .meta {
+    font-size:10px
+}
+
+footer {
+    border-top:3px double #648b76;
+    padding-top:15px;
+    margin-top:29px;
+    color:#819077;
+    font-size:10px
+}

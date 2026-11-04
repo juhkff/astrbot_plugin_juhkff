@@ -1,11 +1,7 @@
-"""本地 HTML 渲染：用 playwright 驱动本机 Chromium 截图。
+"""Render self-contained HTML locally with a shared Chromium instance.
 
-旧插件（Yunzai）是在机器人所在机器上用 puppeteer 渲染的：视口 578×1885、
-deviceScaleFactor 5，图片也由本机下载。这里照搬同样的参数，日报就不再依赖
-远端 t2i 服务，HTML 与聊天相关数据也不会离开这台机器。
-
-只做一件事：拿一段完整 HTML（CSS/图片已经内联好），返回 PNG 字节。
-没有 playwright 或 Chromium 时由调用方退回纯文本。
+Callers may choose a viewport and scale; existing help images keep the default
+608px viewport. Rendering failures never invoke a remote rendering service.
 """
 
 from __future__ import annotations
@@ -15,13 +11,13 @@ from typing import Any
 
 from astrbot.api import logger
 
-# 与上游 page.ts:92-96 完全一致：578×1885 的画面，5 倍像素密度 → 2890px 宽
+# Keep existing callers' viewport and pixel density unless explicitly overridden.
 VIEWPORT: dict[str, int] = {"width": 608, "height": 1100}
 DEVICE_SCALE_FACTOR = 5
 
 
 class LocalHtmlRenderer:
-    """单例式封装：懒启动浏览器，串行渲染，close() 时关掉。"""
+    """Lazily start one browser and serialize rendering and shutdown."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -30,82 +26,166 @@ class LocalHtmlRenderer:
 
     @staticmethod
     def available() -> bool:
-        """playwright 装了没（Chromium 是否下好由首次渲染时暴露）。"""
+        """Check whether Playwright can be imported.
+
+        Returns:
+            Whether the local rendering dependency is installed.
+        """
         try:
             import playwright  # noqa: F401
         except Exception:
             return False
         return True
 
+    async def _cleanup(self, page: Any = None, *, close_browser: bool = False) -> None:
+        """Finish resource cleanup while the caller holds the render lock.
+
+        Args:
+            page: Page to close, if one was created.
+            close_browser: Whether to discard the shared browser and driver too.
+        """
+
+        async def release() -> None:
+            nonlocal close_browser
+            if page is not None:
+                try:
+                    await page.close()
+                except (Exception, asyncio.CancelledError):
+                    logger.exception("[juhkff] Closing the render page failed")
+                    close_browser = True
+            if close_browser:
+                browser, playwright = self._browser, self._playwright
+                self._browser = self._playwright = None
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except (Exception, asyncio.CancelledError):
+                        logger.exception("[juhkff] Closing the local browser failed")
+                if playwright is not None:
+                    try:
+                        await playwright.stop()
+                    except (Exception, asyncio.CancelledError):
+                        logger.exception("[juhkff] Stopping Playwright failed")
+
+        # Keep the lock until cleanup finishes, including repeated cancellation.
+        cleanup = asyncio.create_task(release())
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            if not close_browser:
+                await self._cleanup(close_browser=True)
+            raise asyncio.CancelledError
+
     async def _ensure_browser(self) -> Any:
-        if self._browser is not None:
+        """Reuse a connected browser or start a fresh local instance.
+
+        Returns:
+            The connected browser, with its driver owned by this renderer.
+        """
+        if self._browser is not None and self._browser.is_connected():
             return self._browser
+        await self._cleanup(close_browser=True)
         from playwright.async_api import async_playwright
 
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--hide-scrollbars"]
-        )
-        logger.info("[juhkff] 本地渲染器已启动（Chromium headless）")
+        try:
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--hide-scrollbars"]
+            )
+        except BaseException:
+            await self._cleanup(close_browser=True)
+            raise
+        logger.info("[juhkff] Local renderer started (Chromium headless)")
         return self._browser
 
     async def render(
-        self, html: str, *, timeout: float = 120, scale: int = DEVICE_SCALE_FACTOR
+        self,
+        html: str,
+        *,
+        timeout: float = 120,
+        scale: float = DEVICE_SCALE_FACTOR,
+        viewport: dict[str, int] | None = None,
     ) -> bytes:
-        """渲染整页并截图，返回 PNG 字节。
+        """Render a page locally and capture its full content.
 
-        `wait_until="load"` 而不是 networkidle：封面/图标偶尔连不上时不会
-        把整张图拖到超时，页面主体结构已就绪即可截图。
+        Args:
+            html: Self-contained HTML document to render.
+            timeout: Maximum page loading time in seconds.
+            scale: Device pixel density used for the screenshot.
+            viewport: Optional viewport dimensions in CSS pixels.
+
+        Returns:
+            The rendered PNG bytes.
         """
         async with self._lock:
-            browser = await self._ensure_browser()
-            page = await browser.new_page(
-                viewport=VIEWPORT, device_scale_factor=scale
-            )
+            page = None
+            failed = True
             try:
+                browser = await self._ensure_browser()
+                page = await browser.new_page(
+                    viewport=viewport or VIEWPORT, device_scale_factor=scale
+                )
                 try:
                     await page.set_content(
                         html, wait_until="load", timeout=int(timeout * 1000)
                     )
                 except Exception:
-                    # 有图片卡住时 set_content 会超时，但 DOM 已经在了，照样截
-                    logger.warning("[juhkff] 本地渲染：页面加载超时，按当前内容截图")
+                    # A slow image must not prevent capturing the existing DOM.
+                    logger.warning(
+                        "[juhkff] Local page loading failed; capturing current content"
+                    )
                 png = await page.screenshot(full_page=True, type="png")
+                failed = False
+                return bytes(png)
             finally:
-                await page.close()
-            return bytes(png)
+                await self._cleanup(page, close_browser=failed)
 
     async def close(self) -> None:
-        """插件卸载/重载时调用，避免留下孤儿 Chromium 进程。"""
-        if self._browser is not None:
-            try:
-                await self._browser.close()
-            except Exception:
-                logger.exception("[juhkff] 关闭本地浏览器失败")
-            self._browser = None
-        if self._playwright is not None:
-            try:
-                await self._playwright.stop()
-            except Exception:
-                logger.exception("[juhkff] 停止 playwright 失败")
-            self._playwright = None
+        """Wait for active rendering and release the browser and driver."""
+        async with self._lock:
+            await self._cleanup(close_browser=True)
 
 
-# 插件内共用一个浏览器进程
+# Share one browser process across the plugin.
 renderer = LocalHtmlRenderer()
 
 
 async def render_template(
-    template: str, payload: dict, *, timeout: float = 120, scale: int = DEVICE_SCALE_FACTOR
+    template: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 120,
+    scale: float = DEVICE_SCALE_FACTOR,
+    viewport: dict[str, int] | None = None,
 ) -> bytes | None:
-    """Jinja2 渲染模板 → 本地 Chromium 截图。不可用或失败时返回 None。"""
+    """Render a Jinja template with the local Chromium instance.
+
+    Args:
+        template: Jinja template containing the complete HTML document.
+        payload: Template variables.
+        timeout: Maximum page loading time in seconds.
+        scale: Device pixel density used for the screenshot.
+        viewport: Optional viewport dimensions in CSS pixels.
+
+    Returns:
+        PNG bytes, or None if local rendering is unavailable or fails.
+    """
     if not LocalHtmlRenderer.available():
         return None
     try:
         from jinja2 import Environment
 
         html = Environment(autoescape=False).from_string(template).render(**payload)
-        return await renderer.render(html, timeout=timeout, scale=scale)
+        return await renderer.render(
+            html, timeout=timeout, scale=scale, viewport=viewport
+        )
     except Exception:
-        logger.exception("[juhkff] 本地渲染失败（检查是否执行过 playwright install chromium）")
+        logger.exception(
+            "[juhkff] Local rendering failed; check playwright install chromium"
+        )
         return None

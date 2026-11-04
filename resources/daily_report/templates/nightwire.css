@@ -1,0 +1,266 @@
+body {
+    background:#09151f;
+    color:#dde8eb
+}
+
+.sheet {
+    padding:29px 40px 23px;
+    background:radial-gradient(ellipse 720px 390px at 100% 0,rgba(33,95,110,.38),transparent),#09151f
+}
+
+.skyline {
+    display:flex;
+    justify-content:space-between;
+    font:10px 'DejaVu Sans Mono';
+    letter-spacing:1.1px;
+    color:#82a5af;
+    border-bottom:1px solid #29404a;
+    padding-bottom:18px
+}
+
+.skyline i {
+    display:inline-block;
+    width:7px;
+    height:7px;
+    border-radius:50%;
+    background:#c9f36b;
+    margin-right:8px;
+    box-shadow:0 0 12px #c9f36b80
+}
+
+.night-title {
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    margin:41px 0 32px
+}
+
+.night-title h1 {
+    font-size:70px;
+    line-height:1.2;
+    letter-spacing:6px;
+    font-weight:700
+}
+
+.night-title h1 span {
+    font-weight:300;
+    color:#a4bbc1
+}
+
+.night-title p {
+    font-size:15px;
+    letter-spacing:3px;
+    color:#94aeb8;
+    margin-top:18px
+}
+
+.nightdate b {
+    display:block;
+    font:53px 'DejaVu Sans Mono';
+    letter-spacing:-4px;
+    color:#d8f18a
+}
+
+.nightdate em {
+    font-style:normal;
+    color:#526c76;
+    margin:0 10px
+}
+
+.nightdate>div {
+    font-size:12px;
+    margin-top:9px;
+    color:#9cbbc2;
+    text-align:right
+}
+
+.horizon {
+    border:1px solid #29414c;
+    padding:17px 21px 18px;
+    position:relative
+}
+
+.horizon>span {
+    font-size:10px;
+    letter-spacing:2px;
+    color:#99acb2
+}
+
+.holidays {
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    margin-top:13px;
+    gap:24px
+}
+
+.holiday {
+    border-left:2px solid #57716f;
+    padding-left:13px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center
+}
+
+.holiday-name {
+    font-size:14px
+}
+
+.holiday small {
+    font-size:10px;
+    color:#79939e;
+    margin-top:4px
+}
+
+.holiday-days {
+    font:28px 'DejaVu Sans Mono';
+    color:#d3ef91;
+    white-space:nowrap
+}
+
+.holiday-days span {
+    font-size:11px;
+    color:#97b1ad
+}
+
+.wire {
+    margin-top:38px;
+    border-left:1px solid #35515c;
+    margin-left:17px;
+    padding-left:34px
+}
+
+.channel {
+    padding-bottom:34px
+}
+
+.channelhead {
+    position:relative;
+    display:flex;
+    align-items:center;
+    margin-bottom:18px
+}
+
+.node {
+    position:absolute;
+    left:-51px;
+    width:34px;
+    height:34px;
+    border:1px solid #a5c275;
+    background:#10252d;
+    color:#d8ee9f;
+    display:grid;
+    place-items:center;
+    font:11px 'DejaVu Sans Mono'
+}
+
+.channelhead .kicker {
+    font-size:10px;
+    color:#91acb6;
+    letter-spacing:2px
+}
+
+.channelhead h2 {
+    font-size:27px;
+    font-weight:500;
+    letter-spacing:6px;
+    margin-top:4px
+}
+
+.channelcount {
+    margin-left:auto;
+    color:#91aebb;
+    font:11px 'DejaVu Sans Mono'
+}
+
+.signals {
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:20px;
+    margin-bottom:16px
+}
+
+.signals:has(> .signal:only-child) {
+    grid-template-columns:minmax(0,calc(50% - 10px));
+    justify-content:center
+}
+
+.signal {
+    position:relative;
+    background:#132732;
+    border:1px solid #28414d;
+    display:block;
+    padding:12px
+}
+
+.signal>.index {
+    display:none
+}
+
+.signal .news-photo {
+    height:169px;
+    margin-bottom:12px
+}
+
+.signal h3 {
+    font-size:19px;
+    font-weight:500;
+    line-height:1.6
+}
+
+.signal .meta {
+    margin-top:11px;
+    font-size:10px;
+    color:#9eb6c1
+}
+
+.signal:not(:has(img)) {
+    border-top:3px solid #b8df6d;
+    padding:22px
+}
+
+.wirelist .news {
+    display:flex;
+    gap:15px;
+    border-bottom:1px solid #203843;
+    padding:10px 0;
+    align-items:baseline
+}
+
+.wirelist .index {
+    font-size:10px;
+    color:#76969f;
+    flex:none
+}
+
+.wirelist .story {
+    display:grid;
+    grid-template-columns:1fr 132px;
+    align-items:baseline;
+    gap:18px;
+    flex:1
+}
+
+.wirelist h3 {
+    font-size:17px;
+    color:#cbd9de
+}
+
+.wirelist .meta {
+    display:block;
+    text-align:right;
+    font-size:10px;
+    color:#85a5af
+}
+
+.wirelist time {
+    display:block;
+    font-size:9px;
+    margin-top:2px;
+    color:#7a95a0
+}
+
+footer {
+    border-top:1px solid #35515c;
+    padding-top:15px;
+    color:#8babb4
+}

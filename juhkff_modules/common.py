@@ -7,31 +7,31 @@ import json
 import os
 import re
 import tempfile
-import time
 from abc import ABC
-from collections.abc import Awaitable, Callable, Mapping, Coroutine
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
-
-import aiohttp
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context
 
-# AstrBot 内置 IO 工具：优先复用（自带 certifi 证书、SSL 失败降级、
-# trust_env 代理与临时文件管理），不可用时退回本文件里的实现。
+from .http_utils import public_request
+
+# Reuse AstrBot's path and temporary-image helpers. Remote requests use the
+# shared bounded public HTTP client instead of an unrestricted core downloader.
 try:
     from astrbot.core.utils.io import (
-        download_image_by_url as _builtin_download_image,
         ensure_dir as _builtin_ensure_dir,
+    )
+    from astrbot.core.utils.io import (
         save_temp_img as _builtin_save_temp_img,
     )
 except Exception:  # pragma: no cover - 兼容 AstrBot 内部结构调整
-    _builtin_download_image = None
     _builtin_ensure_dir = None
     _builtin_save_temp_img = None
 
@@ -168,13 +168,13 @@ class PluginLike(Protocol):
     def version(self) -> str: ...
 
     @property
-    def modules(self) -> Mapping[str, "BaseModule"]: ...
+    def modules(self) -> Mapping[str, BaseModule]: ...
 
     @property
     def context(self) -> Context: ...
 
     @property
-    def scheduler(self) -> "Scheduler": ...
+    def scheduler(self) -> Scheduler: ...
 
 
 class Scheduler:
@@ -194,7 +194,9 @@ class Scheduler:
         self.name = name
         self._jobs: list[str] = []
 
-    def _wrap(self, fn: Callable[[], Awaitable[Any]], label: str) -> Callable[[], Awaitable[None]]:
+    def _wrap(
+        self, fn: Callable[[], Awaitable[Any]], label: str
+    ) -> Callable[[], Awaitable[None]]:
         async def runner() -> None:
             try:
                 await fn()
@@ -317,13 +319,14 @@ class BaseModule(ABC):
     @property
     def debug_enabled(self) -> bool:
         """配置页「全局设置 → 调试日志」是否打开（`global.debug`）。"""
-        return bool((self.plugin.config.get("global") or {}).get("debug", False))
+        return bool((self.plugin.config.get("global") or {}).get("debug", True))
 
     def debug(self, msg: str, **kwargs: Any) -> None:
-        """明细日志：调试日志打开时用 INFO 输出，否则压成 DEBUG。
+        """Log details at INFO by default, or DEBUG when explicitly disabled.
 
-        AstrBot 的 DEBUG 默认不显示，打开配置里的「调试日志」就不用去改
-        框架的日志级别，排查完再关掉即可。
+        Args:
+            msg: Detail message for the plugin log.
+            **kwargs: Additional arguments forwarded to the logger.
         """
         if self.debug_enabled:
             logger.info(msg, **kwargs)
@@ -357,7 +360,14 @@ class BaseModule(ABC):
     # -- 消息
 
     def intercepts(self, event: AstrMessageEvent) -> bool:
-        """交互式流程是否独占该会话的消息（例如骰子添加、情景模式）。"""
+        """Claim a command or an interactive input before passive handlers.
+
+        Args:
+            event: Incoming message after AstrBot's wake checks.
+
+        Returns:
+            Whether this module should exclusively handle the message.
+        """
         return False
 
     async def handle(self, event: AstrMessageEvent) -> MessageChain | None:
@@ -430,17 +440,38 @@ async def fetch_json(
     headers: dict[str, Any] | None = None,
     proxy: str | None = None,
     timeout: float = 20.0,
+    max_bytes: int = 3 * 1024 * 1024,
+    allowed_hosts: set[str] | None = None,
 ) -> Any:
-    """GET 一个 JSON 接口，HTTP 错误时抛异常。"""
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-    # proxy 传空字符串会被 aiohttp 当成非法值，这里统一转成 None
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.get(
-            url, params=params, headers=headers, proxy=proxy or None
-        ) as resp:
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status} {url}")
-            return await resp.json(content_type=None)
+    """Read bounded public JSON, validating and pinning every redirect target.
+
+    Args:
+        url: Public HTTP or HTTPS endpoint.
+        params: Optional query parameters appended to the existing query.
+        headers: Optional caller-controlled request headers.
+        proxy: Explicit proxy configured by the operator.
+        timeout: Total request deadline, including redirects and DNS.
+        max_bytes: Maximum decompressed response size.
+        allowed_hosts: Optional exact host allowlist for all hops.
+
+    Returns:
+        The decoded JSON response.
+    """
+    if params:
+        parsed = urlsplit(url)
+        query = "&".join(
+            part for part in (parsed.query, urlencode(params, doseq=True)) if part
+        )
+        url = urlunsplit(parsed._replace(query=query))
+    payload, _ = await public_request(
+        url,
+        headers=headers,
+        proxy=proxy or None,
+        timeout=timeout,
+        max_bytes=max_bytes,
+        allowed_hosts=allowed_hosts,
+    )
+    return json.loads(payload)
 
 
 async def fetch_bytes(
@@ -449,14 +480,31 @@ async def fetch_bytes(
     headers: dict[str, Any] | None = None,
     proxy: str | None = None,
     timeout: float = 30.0,
+    max_bytes: int = 64 * 1024 * 1024,
+    allowed_hosts: set[str] | None = None,
 ) -> bytes:
-    """下载二进制内容（图片等），HTTP 错误时抛异常。"""
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.get(url, headers=headers, proxy=proxy or None) as resp:
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status} {url}")
-            return await resp.read()
+    """Read bounded public bytes without changing or compressing the payload.
+
+    Args:
+        url: Public HTTP or HTTPS resource.
+        headers: Optional caller-controlled request headers.
+        proxy: Explicit proxy configured by the operator.
+        timeout: Total request deadline, including redirects and DNS.
+        max_bytes: Maximum decompressed response size, independent of compression.
+        allowed_hosts: Optional exact host allowlist for all hops.
+
+    Returns:
+        The original response bytes.
+    """
+    payload, _ = await public_request(
+        url,
+        headers=headers,
+        proxy=proxy or None,
+        timeout=timeout,
+        max_bytes=max_bytes,
+        allowed_hosts=allowed_hosts,
+    )
+    return payload
 
 
 async def download_image_bytes(
@@ -466,23 +514,17 @@ async def download_image_bytes(
     proxy: str | None = None,
     timeout: float = 30.0,
 ) -> bytes:
-    """下载图片并返回字节。
+    """Download public image bytes with the shared redirect and size protections.
 
-    没有自定义请求头、也没有单独指定代理时，直接复用 AstrBot 的
-    `download_image_by_url`（证书、SSL 降级、trust_env 代理都由框架处理）；
-    其它情况（例如 Pixiv 需要 Referer）走本文件的 aiohttp 实现。
+    Args:
+        url: Public HTTP or HTTPS image resource.
+        headers: Optional request headers such as Referer.
+        proxy: Explicit proxy configured by the operator.
+        timeout: Total request deadline.
+
+    Returns:
+        Original response bytes bounded to the common image download limit.
     """
-    if not headers and not proxy and _builtin_download_image is not None:
-        try:
-            path = await _builtin_download_image(url)
-            data = await asyncio.to_thread(Path(path).read_bytes)
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-            return data
-        except Exception as exc:
-            logger.debug(f"[juhkff] 内置图片下载失败，回退 aiohttp: {exc}")
     return await fetch_bytes(url, headers=headers, proxy=proxy, timeout=timeout)
 
 

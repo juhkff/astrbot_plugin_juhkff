@@ -4,19 +4,17 @@
 
 - 触发条件：**被 @ 或被引用回复**且 `replyAtBot` 时必回；否则按
   `defaultChatRate` / `groupChatRate` 里的概率掷骰子；**没有冷却、没有最小消息数**；
-- 指令消息：以唤醒前缀（AstrBot 全局 `wake_prefix`，默认 `/`）开头的消息、
-  `@全体成员` 这类「被唤醒但不是在叫机器人」的消息，既不写历史也不回复，
-  避免 `/juhkff`、`#帮助` 被当成闲聊抢答。判断直接复用框架置好的
-  `event.is_at_or_wake_command`，再用「真 @ / 引用回复」把它和本次要接的话区分开；
+- Command messages never enter chat history or trigger active chat. Registered
+  command matches and original message prefixes take precedence over mentions
+  and quoted replies, even after AstrBot strips the wake prefix. Messages such
+  as @all that wake the bot without addressing it are also excluded.
 - 上下文：`useContext` 打开时，把最近 `maxHistoryLength` 条群消息作为
   `contexts` 结构化传给 `llm_generate`（别人的是 user、自己的是 assistant）；
-- 历史存储：只存 Redis（LIST，key 为 `前缀:umo`，只留最近 64 条），内存里
-  不保留副本，每次要上下文时现拉；和上游 `loadContext()` 每次从 Redis 读
-  的做法一致。每条写入都刷新 `history_ttl_hours`（默认 12 小时，和上游
-  `EX 12*60*60` 对齐），0 表示不过期。`clear_history_on_start`（默认开）在
-  AstrBot 进程真正重启时清空该前缀下的所有会话；同一进程里的插件热重载
-  （比如在 WebUI 保存配置）不会清，靠 Redis 里的 `__owner` 标记区分；
-  连不上 Redis 时不记录历史（只按当前消息回复），不会再退回内存；
+- History lives only in a bounded Redis LIST (last 64 entries). The default
+  context window is 20 entries and the default TTL is 0 (no expiration).
+  Reloading with TTL 0 removes previous expiration settings. The independent
+  clear_history_on_start option still controls clearing after a process restart;
+  hot reloads preserve history. Unavailable Redis means no stored context.
 - 人设：`chatPrompts` 是 `{name, prompt}` 列表，`chatPromptApply` 选择用哪条；
 - 模型：直接用 AstrBot 里配置的对话 provider（`provider` 留空则取当前会话的
   对话模型）；插件不再自己管理 Key / 模型名 / 接口地址；
@@ -42,19 +40,16 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import os
-import socket
 import random
 import re
 import time
+from collections.abc import Awaitable
 from datetime import datetime
-from typing import Any, Awaitable, cast
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
-
-import aiohttp
 
 try:  # 没装 redis 客户端时只是不记录历史，不影响插件加载
     import redis.asyncio as redis_asyncio
@@ -63,7 +58,7 @@ except Exception:  # pragma: no cover - 依赖缺失时才走到
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, Image, Reply
+from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.platform import MessageType
 from astrbot.core.agent.message import (
     AssistantMessageSegment,
@@ -75,6 +70,7 @@ from astrbot.core.agent.message import (
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from .common import BaseModule, PluginLike, truncate
+from .http_utils import public_request
 
 DEFAULT_PROMPT = (
     "你在一个QQ群聊里，扮演一名普通群员参与聊天。\n"
@@ -133,6 +129,7 @@ def _focus_slice(text: str, focus: str, limit: int) -> str:
     picked.sort(key=lambda x: x[0])
     return " ".join(p for _, p in picked)
 
+
 _TAG_RE = re.compile(r"<script.*?</script>|<style.*?</style>|<[^>]+>", re.S | re.I)
 
 
@@ -165,7 +162,7 @@ class ActiveChatModule(BaseModule):
         await self._init_redis()
         logger.info(
             f"[juhkff] 主动群聊已就绪：默认概率 "
-            f"{self.cfg.get('default_chat_rate', 0.1)}，"
+            f"{self.cfg.get('default_chat_rate', 0.2)}，"
             f"分群覆盖 {len(self.cfg.get('group_chat_rate') or [])} 条，"
             f"历史后端 {'Redis' if self._redis else '未连接 Redis（不记录历史）'}"
         )
@@ -195,22 +192,28 @@ class ActiveChatModule(BaseModule):
         if not url:
             return
         if redis_asyncio is None:
-            logger.warning(
-                "[juhkff] 没安装 redis 客户端，主动群聊历史将不会记录"
-            )
+            logger.warning("[juhkff] 没安装 redis 客户端，主动群聊历史将不会记录")
             return
         try:
             client = redis_asyncio.from_url(url, decode_responses=True)
             await client.ping()
         except Exception as exc:
-            logger.warning(
-                f"[juhkff] 连接 Redis 失败（{exc}），主动群聊历史将不会记录"
-            )
+            logger.warning(f"[juhkff] 连接 Redis 失败（{exc}），主动群聊历史将不会记录")
             return
         self._redis = client
         self._prefix = str(self.cfg.get("redis_key_prefix") or DEFAULT_PREFIX)
         if bool(self.cfg.get("clear_history_on_start", True)):
             await self._clear_history_if_new_process(client)
+        if self._ttl_seconds() == 0:
+            # A reload must also remove TTLs left by the previous configuration.
+            try:
+                async for key in client.scan_iter(match=f"{self._prefix}:*"):
+                    if key != f"{self._prefix}:__owner":
+                        await client.persist(key)
+            except Exception:
+                logger.warning(
+                    "[juhkff] Could not remove existing history TTLs", exc_info=True
+                )
         logger.info(f"[juhkff] 主动群聊历史已启用 Redis：{self._mask_url(url)}")
 
     async def _clear_history_if_new_process(self, client: Any) -> None:
@@ -240,11 +243,11 @@ class ActiveChatModule(BaseModule):
         logger.info(f"[juhkff] 首次启动，已清空 Redis 历史 {deleted} 个会话")
 
     def _ttl_seconds(self) -> int:
-        """单条历史的过期时间（秒）。0 表示不过期。"""
+        """Return the history lifetime in seconds; zero disables expiration."""
         try:
-            hours = float(self.cfg.get("history_ttl_hours", 12) or 0)
+            hours = float(self.cfg.get("history_ttl_hours", 0) or 0)
         except (TypeError, ValueError):
-            hours = 12.0
+            hours = 0.0
         return max(0, int(hours * 3600))
 
     async def _fetch_history(self, umo: str) -> list[dict[str, Any]]:
@@ -271,12 +274,11 @@ class ActiveChatModule(BaseModule):
         return history
 
     async def _append(self, umo: str, entry: dict[str, Any]) -> None:
-        """把一条历史追加进 Redis 列表。
+        """Append bounded Redis history and apply the configured expiration.
 
-        RPUSH + LTRIM 保证只留最近 HISTORY_MAX 条，顺手刷新整个 key 的
-        TTL（`history_ttl_hours`）——和上游每条消息 `EX 12*60*60` 的效果
-        一致：最后一条消息之后过 12 小时，这段历史自然过期。
-        写失败只记日志，本回合照常回复，只是这段上下文不会持久化。
+        Args:
+            umo: Conversation origin used as the Redis key suffix.
+            entry: Message data to persist without an in-memory history copy.
         """
         if self._redis is None:
             return
@@ -288,13 +290,31 @@ class ActiveChatModule(BaseModule):
             ttl = self._ttl_seconds()
             if ttl > 0:
                 pipe.expire(key, ttl)
+            else:
+                pipe.persist(key)
             await pipe.execute()
         except Exception:
             logger.warning("[juhkff] 写入 Redis 历史失败", exc_info=True)
 
     # ------------------------------------------------------------ 消息
 
-    async def handle(self, event: AstrMessageEvent) -> MessageChain | None:
+    async def observe(self, event: AstrMessageEvent) -> list[dict[str, Any]] | None:
+        """Record one eligible incoming message before automatic responders run.
+
+        Args:
+            event: Incoming event, excluding commands, private chats and self echoes.
+
+        Returns:
+            The history snapshot from before this message was appended, or None
+            when the event is ineligible. A snapshot on the event prevents duplicate
+            appends; Redis remains the only persistent history store.
+        """
+        if not self.enabled:
+            return None
+        # Command matches take precedence even when the message also mentions
+        # or quotes the bot. Skip before reading or writing Redis history.
+        if event.is_stopped() or event.get_extra("handlers_parsed_params"):
+            return None
         # 只处理群聊：私聊不主动接话
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             return None
@@ -309,14 +329,27 @@ class ActiveChatModule(BaseModule):
         text = (event.message_str or "").strip()
         sender = _sender(event)
         called = self._called(event)
-        # 被唤醒、但并不是在「叫」机器人（唤醒前缀 / @全体 之类）的消息是指令：
-        # 不参与主动群聊，也不写进聊天历史。框架已经把这个判断好了
-        # （`WakingCheckStage` 剥前缀后置位 is_at_or_wake_command），直接复用即可。
+        # Prefixes may already have been removed from message_str by AstrBot.
+        # The original Plain components still distinguish a prefixed command
+        # from an ordinary @ or quoted conversation, including custom prefixes.
+        raw_text = "".join(
+            seg.text
+            for seg in (event.message_obj.message or [])
+            if isinstance(seg, Plain)
+        ).strip()
+        command_prefixes = ("#", "/") + tuple(
+            prefix
+            for prefix in self.plugin.context.get_config(umo).get("wake_prefix", ["/"])
+            if prefix
+        )
+        if text.startswith(command_prefixes) or raw_text.startswith(command_prefixes):
+            return None
         if event.is_at_or_wake_command and not called:
             return None
-        # 插件自己的 `#xxx` 指令（#帮助 / #日报 …）同理，交给对应模块处理
-        if text.startswith("#"):
-            return None
+
+        observed = event.get_extra("juhkff_active_chat_history")
+        if isinstance(observed, list):
+            return observed
 
         # 先把历史取出来，再写本回合这条消息。
         # 不能反过来「先写、再从列表尾部丢掉最后一条」：Redis 列表是所有消息
@@ -328,11 +361,7 @@ class ActiveChatModule(BaseModule):
         images = self._images(event)
         # 历史里只存 http(s) 地址：本地临时文件会被清理，下次看不到；
         # 需要下载的（file:// 之类）等真正要回复时再解析（见 `_reply_image_urls`）。
-        image_refs = [
-            ref
-            for comp in images
-            if (ref := self._http_ref(comp))
-        ]
+        image_refs = [ref for comp in images if (ref := self._http_ref(comp))]
         text_part = truncate(text, 300).strip() if text else ""
         if image_refs:
             # 编号只给真正存进历史、能再看到的图，保证 [图片N] 和 entry["images"]
@@ -358,12 +387,31 @@ class ActiveChatModule(BaseModule):
         }
         if image_refs:
             entry["images"] = image_refs
-        # 提取模式：正文只为本轮抓一次，不写进历史（历史里只留群友原话里的链接，
-        # 后续轮次如果还想看内容，由模型处理模式下的 fetch_url 现抓）
+        await self._append(umo, entry)
+        event.set_extra("juhkff_active_chat_history", history)
+        return history
+
+    async def handle(self, event: AstrMessageEvent) -> MessageChain | None:
+        """Reply by probability after idempotently recording the incoming event.
+
+        Args:
+            event: An eligible conversation that no earlier module has consumed.
+
+        Returns:
+            None because active chat sends its reply and records success directly.
+        """
+        history = await self.observe(event)
+        if history is None:
+            return None
+        umo = event.unified_msg_origin
+        text = (event.message_str or "").strip()
+        sender = _sender(event)
+        called = self._called(event)
+        images = self._images(event)
+        # External page text is transient and is never added to Redis history.
         link_text = ""
         if self._url_mode() == "extract":
             link_text = await self._analyze_urls(text)
-        await self._append(umo, entry)
 
         # 掷骰子决定这次要不要接话；不接就静默返回，等后续消息
         if not self._should_speak(umo, called):
@@ -387,7 +435,9 @@ class ActiveChatModule(BaseModule):
         try:
             await event.send(chain)
         except Exception:
-            logger.warning("[juhkff] 主动群聊：发送失败，这句话不写进历史", exc_info=True)
+            logger.warning(
+                "[juhkff] 主动群聊：发送失败，这句话不写进历史", exc_info=True
+            )
             event.stop_event()
             return None
         event.stop_event()
@@ -406,7 +456,7 @@ class ActiveChatModule(BaseModule):
         return random.random() < rate
 
     def _rates(self, umo: str) -> tuple[float, bool]:
-        rate = float(self.cfg.get("default_chat_rate", 0.1) or 0)
+        rate = float(self.cfg.get("default_chat_rate", 0.2) or 0)
         reply_at_bot = bool(self.cfg.get("default_reply_at_bot", True))
         # 分群覆盖：配置里按群号或完整 umo 匹配，命中第一条即生效
         for rule in self.cfg.get("group_chat_rate") or []:
@@ -441,7 +491,9 @@ class ActiveChatModule(BaseModule):
             netloc = f"{parts.username}:***@{host}"
             if parts.port:
                 netloc += f":{parts.port}"
-            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+            return urlunsplit(
+                (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+            )
         except Exception:
             return "redis://***"
 
@@ -454,7 +506,11 @@ class ActiveChatModule(BaseModule):
         """
         tz = self._tzinfo()
         try:
-            moment = datetime.fromtimestamp(float(ts), tz) if tz else datetime.fromtimestamp(float(ts))
+            moment = (
+                datetime.fromtimestamp(float(ts), tz)
+                if tz
+                else datetime.fromtimestamp(float(ts))
+            )
         except (TypeError, ValueError, OSError):
             return ""
         now = datetime.now(tz) if tz else datetime.now()
@@ -591,7 +647,9 @@ class ActiveChatModule(BaseModule):
         """取要喂给模型的最近几条聊天（不含本回合这条）。"""
         if not bool(self.cfg.get("use_context", True)):
             return []
-        limit = max(1, int(self.cfg.get("max_history_length", 5) or 5))
+        limit = max(0, int(self.cfg.get("max_history_length", 20) or 0))
+        if limit == 0:
+            return []
         return (await self._fetch_history(umo))[-limit:]
 
     def _build_contexts(
@@ -611,12 +669,14 @@ class ActiveChatModule(BaseModule):
                 # 自己的话也带时间，时间只用于喂模型，不影响真正发出去的消息
                 stamp = self._format_ts(item.get("ts"))
                 said = f"{stamp} {text}" if stamp else text
-                contexts.append(
-                    AssistantMessageSegment(content=[TextPart(text=said)])
-                )
+                contexts.append(AssistantMessageSegment(content=[TextPart(text=said)]))
                 continue
             stamp = self._format_ts(item.get("ts"))
-            head = f"{stamp} {item.get('name')}：{text}" if stamp else f"{item.get('name')}：{text}"
+            head = (
+                f"{stamp} {item.get('name')}：{text}"
+                if stamp
+                else f"{item.get('name')}：{text}"
+            )
             parts: list[Any] = [TextPart(text=head)]
             # 历史图跟在文字后面，顺序与发送时一致；模型支持图片时能看到它们
             if with_images:
@@ -685,9 +745,7 @@ class ActiveChatModule(BaseModule):
         if url_mode == "extract" and link_text:
             # 链接正文单独作为一条参考消息插入历史之后，不拼进用户这句话里：
             # 既不会把群友的原话冲淡，也方便在这一段前后加边界说明。
-            link_contexts = [
-                UserMessageSegment(content=[TextPart(text=link_text)])
-            ]
+            link_contexts = [UserMessageSegment(content=[TextPart(text=link_text)])]
         elif url_mode == "model":
             # 不预读正文，只把「读网页」做成工具；模型判断需要时才调用
             tools = self._url_toolset()
@@ -862,56 +920,19 @@ class ActiveChatModule(BaseModule):
 
     # ------------------------------------------------------------ 辅助能力
 
-    @staticmethod
-    async def _is_public_url(url: str) -> bool:
-        """URL 是否指向公网地址（挡住 localhost / 内网 / 保留地址）。"""
-        try:
-            host = urlsplit(url).hostname or ""
-        except Exception:
-            return False
-        if not host:
-            return False
-        try:
-            infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
-        except Exception:
-            return False
-        for info in infos:
-            addr = str(info[4][0]).split("%", 1)[0]
-            try:
-                ip = ipaddress.ip_address(addr)
-            except ValueError:
-                return False
-            if not ip.is_global:
-                return False
-        return True
+    async def _fetch_public_page(self, url: str) -> str:
+        """Read a bounded page using the shared public request policy and proxy.
 
-    async def _fetch_public_page(
-        self, session: aiohttp.ClientSession, url: str
-    ) -> str:
-        """抓一个公网页面的正文；重定向逐跳检查，绝不向内网发请求。
+        Args:
+            url: Untrusted link from a message or model tool call.
 
-        aiohttp 默认自动跟随 302，等拿到 `resp.url` 再检查时请求已经发出去了。
-        这里关掉自动重定向、自己跟：每一跳先过 `_is_public_url` 再发请求，
-        所以公网地址 302 到 127.0.0.1 时不会真的打到内网。
+        Returns:
+            UTF-8 page markup. Blocked or oversized responses raise to the caller.
         """
-        current = url
-        for _ in range(5):
-            if not await self._is_public_url(current):
-                return ""
-            async with session.get(current, allow_redirects=False) as resp:
-                if resp.status in (301, 302, 303, 307, 308):
-                    location = resp.headers.get("Location", "")
-                    if not location:
-                        return ""
-                    current = urljoin(current, location)
-                    continue
-                if resp.status != 200:
-                    return ""
-                # 只读前 300KB：有的页面是几百 MB 的视频页/长文，
-                # 全文读进内存再截 800 字很浪费
-                raw = await resp.content.read(300_000)
-                return raw.decode(resp.charset or "utf-8", errors="ignore")
-        return ""
+        raw, _ = await public_request(
+            url, proxy=self.proxy or None, timeout=15.0, max_bytes=300_000
+        )
+        return raw.decode("utf-8", errors="replace")
 
     async def _analyze_urls(self, text: str) -> str:
         """抓消息里前两个链接的正文，作为一条独立的参考消息交给模型。
@@ -924,19 +945,17 @@ class ActiveChatModule(BaseModule):
             return ""
         limit = max(100, int(self.cfg.get("url_content_chars", 400) or 400))
         chunks: list[str] = []
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for url in urls:
-                try:
-                    html = await self._fetch_public_page(session, url)
-                except Exception:
-                    continue
-                if not html:
-                    continue
-                plain = _TAG_RE.sub(" ", html)
-                plain = re.sub(r"\s+", " ", plain).strip()
-                if plain:
-                    chunks.append(f"{url}\n{truncate(plain, limit)}")
+        for url in urls:
+            try:
+                html = await self._fetch_public_page(url)
+            except Exception:
+                continue
+            if not html:
+                continue
+            plain = _TAG_RE.sub(" ", html)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            if plain:
+                chunks.append(f"{url}\n{truncate(plain, limit)}")
         if not chunks:
             return ""
         header = (
@@ -948,8 +967,10 @@ class ActiveChatModule(BaseModule):
     def _url_mode(self) -> str:
         """链接处理方式：off 关闭 / model 交给模型按需读 / extract 预读正文。"""
         raw = self.cfg.get("url_mode")
-        if raw is None:  # 兼容旧版的布尔开关 attach_url_analysis
-            return "extract" if self.cfg.get("attach_url_analysis", False) else "off"
+        if raw is None:
+            if "attach_url_analysis" in self.cfg:
+                return "extract" if self.cfg["attach_url_analysis"] else "off"
+            return "model"
         mode = str(raw or "").strip().lower()
         return mode if mode in ("off", "model", "extract") else "off"
 
@@ -991,9 +1012,7 @@ class ActiveChatModule(BaseModule):
         hit = self._url_cache.get(url)
         if hit and now - hit[0] < _URL_CACHE_TTL:
             return hit[1]
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            html = await self._fetch_public_page(session, url)
+        html = await self._fetch_public_page(url)
         if not html:
             return ""
         text = re.sub(r"\s+", " ", _TAG_RE.sub(" ", html)).strip()
@@ -1031,9 +1050,7 @@ class ActiveChatModule(BaseModule):
         stripped: list[Message] = []
         for msg in contexts:
             text = "".join(
-                part.text
-                for part in (msg.content or [])
-                if isinstance(part, TextPart)
+                part.text for part in (msg.content or []) if isinstance(part, TextPart)
             )
             if not text:
                 continue
@@ -1124,13 +1141,14 @@ class ActiveChatModule(BaseModule):
 
 # ---------------------------------------------------------------- 工具
 
+
 def _clean_reply(text: str) -> str | None:
     """模型经常带引号、换行或说太长，这里统一压成一行、去掉包裹引号。"""
     text = (text or "").strip()
     if not text:
         return None
     text = text.replace("\n", " ").strip()
-    text = text.strip('"\'“”「」').strip()
+    text = text.strip("\"'“”「」").strip()
     return text[:120]
 
 
