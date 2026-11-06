@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -33,10 +35,15 @@ from juhkff_modules.pixiv_push import PixivPushModule
 
 class CommandRoutingTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.plugin = entry.JuhkffPlugin.__new__(entry.JuhkffPlugin)
+        # This fixture bypasses initialization and installs dynamic test stubs.
+        self.plugin: Any = entry.JuhkffPlugin.__new__(entry.JuhkffPlugin)
         self.plugin.config = {
             "global": {"enabled": True},
-            "active_chat": {"enable": True, "default_chat_rate": 1},
+            "active_chat": {
+                "enable": True,
+                "default_chat_rate": 1,
+                "send_delay": {"min_seconds": 0, "max_seconds": 0},
+            },
             "daily_report": {"enable": True},
             "help": {"enable": True},
             "pixiv_push": {"enable": True},
@@ -45,18 +52,23 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         self.core_config["wake_prefix"] = ["/", "#", "!"]
         self.plugin.context = SimpleNamespace(get_config=lambda umo: self.core_config)
         self.plugin._started = True
-        self.plugin.data_dir = "/tmp/juhkff-command-routing-test"
+        self.plugin.data_dir = Path("/tmp/juhkff-command-routing-test")
         self.chat = ActiveChatModule(self.plugin)
-        self.chat._recent_history = AsyncMock(return_value=[])
-        self.chat._append = AsyncMock()
-        self.chat._generate = AsyncMock(return_value="chat reply")
+        self.recent_history = AsyncMock(return_value=[])
+        self.append = AsyncMock()
+        self.generate = AsyncMock(return_value="chat reply")
+        self.chat._recent_history = self.recent_history
+        self.chat._append = self.append
+        self.chat._generate = self.generate
         self.chat._should_speak = Mock(return_value=True)
         self.report = DailyReportModule(self.plugin)
-        self.report._build_chain = AsyncMock(
+        self.build_report = AsyncMock(
             return_value=MessageChain().message("report")
         )
+        self.report._build_chain = self.build_report
         self.help = HelpGenModule(self.plugin)
-        self.help._reply = AsyncMock(return_value=MessageChain().message("help"))
+        self.help_reply = AsyncMock(return_value=MessageChain().message("help"))
+        self.help._reply = self.help_reply
         self.pixiv = PixivPushModule(self.plugin)
 
         async def pixiv_reply(event):
@@ -66,7 +78,8 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
                 else None
             )
 
-        self.pixiv.handle = AsyncMock(side_effect=pixiv_reply)
+        self.pixiv_handle = AsyncMock(side_effect=pixiv_reply)
+        self.pixiv.handle = self.pixiv_handle
         self.card = SimpleNamespace(
             key="share_parse",
             title="card parsing",
@@ -79,13 +92,12 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
             m.key: m for m in (self.chat, self.card, self.report, self.pixiv, self.help)
         }
         self.stage = waking.WakingCheckStage()
-        await self.stage.initialize(
-            SimpleNamespace(
-                astrbot_config=self.core_config,
-                astrbot_config_id="test",
-                db_helper=None,
-            )
+        pipeline_context: Any = SimpleNamespace(
+            astrbot_config=self.core_config,
+            astrbot_config_id="test",
+            db_helper=None,
         )
+        await self.stage.initialize(pipeline_context)
         self.listener = next(
             h
             for h in star_handlers_registry
@@ -97,7 +109,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
             if h.handler_name == "_cmd_status" and "juhkff" in h.handler_module_path
         )
 
-    def event(self, text, addressed=None):
+    def event(self, text, addressed=None) -> Any:
         obj = AstrBotMessage()
         obj.type = MessageType.GROUP_MESSAGE
         obj.self_id = "100"
@@ -142,9 +154,93 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
             pass
 
     def assert_no_chat(self):
-        self.chat._recent_history.assert_not_awaited()
-        self.chat._append.assert_not_awaited()
-        self.chat._generate.assert_not_awaited()
+        self.recent_history.assert_not_awaited()
+        self.append.assert_not_awaited()
+        self.generate.assert_not_awaited()
+
+    async def test_reply_delay_follows_generation_and_precedes_success_history(self):
+        self.plugin.config["active_chat"]["send_delay"] = {
+            "min_seconds": 5,
+            "max_seconds": 2,
+        }
+        event = self.event("hello", "at")
+
+        async def send(chain):
+            self.generate.assert_awaited_once()
+            self.assertTrue(event.is_stopped())
+            self.assertEqual(self.append.await_count, 1)
+
+        event.send.side_effect = send
+        with patch(
+            "juhkff_modules.active_chat.random.uniform", return_value=0.001
+        ) as draw:
+            await self.chat.handle(event)
+        draw.assert_called_once_with(2.0, 5.0)
+        event.send.assert_awaited_once()
+        assert self.append.await_args is not None
+        self.assertTrue(self.append.await_args.args[1]["self"])
+
+    async def test_zero_delay_does_not_wait(self):
+        event = self.event("hello")
+        with patch(
+            "juhkff_modules.active_chat.asyncio.wait_for", side_effect=AssertionError
+        ):
+            await self.chat.handle(event)
+        event.send.assert_awaited_once()
+
+    async def test_stop_interrupts_pending_reply_without_success_history(self):
+        self.plugin.config["active_chat"]["send_delay"] = {
+            "min_seconds": 60,
+            "max_seconds": 60,
+        }
+        event = self.event("hello")
+        task = asyncio.create_task(self.chat.handle(event))
+        await asyncio.sleep(0)
+        self.generate.assert_awaited_once()
+        event.send.assert_not_awaited()
+        self.assertFalse(task.done())
+        await self.chat.stop()
+        await asyncio.wait_for(task, 1)
+        event.send.assert_not_awaited()
+        self.assertEqual(self.append.await_count, 1)
+
+    async def test_cancellation_during_delay_does_not_send(self):
+        self.plugin.config["active_chat"]["send_delay"] = {
+            "min_seconds": 60,
+            "max_seconds": 60,
+        }
+        event = self.event("hello")
+        task = asyncio.create_task(self.chat.handle(event))
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        event.send.assert_not_awaited()
+        self.assertEqual(self.append.await_count, 1)
+
+    async def test_delay_defaults_and_invalid_nonfinite_values_are_safe(self):
+        for config, expected in (
+            ({}, (1.0, 3.0)),
+            ({"min_seconds": -2, "max_seconds": 0}, (0.0, 0.0)),
+            ({"min_seconds": "bad", "max_seconds": float("inf")}, (1.0, 3.0)),
+        ):
+            with self.subTest(config=config):
+                self.plugin.config["active_chat"]["send_delay"] = config
+                event = self.event("hello")
+                with patch(
+                    "juhkff_modules.active_chat.random.uniform", return_value=0
+                ) as draw:
+                    await self.chat.handle(event)
+                draw.assert_called_once_with(*expected)
+                event.send.assert_awaited_once()
+
+    async def test_generation_failure_never_waits_or_sends(self):
+        self.generate.return_value = ""
+        event = self.event("hello")
+        with patch("juhkff_modules.active_chat.random.uniform") as draw:
+            await self.chat.handle(event)
+        draw.assert_not_called()
+        event.send.assert_not_awaited()
 
     async def test_report_commands_with_or_without_mentions_and_replies(self):
         for address in (None, "at", "reply"):
@@ -170,7 +266,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
                         await self.dispatch(event)
                         event.send.assert_not_awaited()
                         self.assert_no_chat()
-        self.report._build_chain.assert_not_awaited()
+        self.build_report.assert_not_awaited()
 
     async def test_help_and_custom_help_after_prefix_removal(self):
         for command in ("帮助", "菜单"):
@@ -224,7 +320,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         async def ping(self, event):
             pass
 
-        metadata = SimpleNamespace(
+        metadata: Any = SimpleNamespace(
             handler=ping,
             handler_name="ping",
             handler_full_name="test.ping",
@@ -259,16 +355,16 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
             await self.dispatch(event)
             self.assertEqual(event.send.await_count, 1)
             self.assertTrue(event.is_stopped())
-        self.assertEqual(self.chat._generate.await_count, 3)
-        self.assertEqual(self.chat._append.await_count, 6)
+        self.assertEqual(self.generate.await_count, 3)
+        self.assertEqual(self.append.await_count, 6)
         self.assertEqual(self.card.handle.await_count, 3)
 
     async def test_plain_help_word_is_not_a_command_without_wakeup(self):
         event = self.event("帮助")
         await self.wake(event)
         await self.dispatch(event)
-        self.help._reply.assert_not_awaited()
-        self.chat._generate.assert_awaited_once()
+        self.help_reply.assert_not_awaited()
+        self.generate.assert_awaited_once()
 
     async def test_other_module_response_prevents_active_chat(self):
         self.card.handle.return_value = MessageChain().message("card parsed")
@@ -277,12 +373,12 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         await self.dispatch(event)
         self.assertEqual(event.send.await_count, 1)
         self.assertTrue(event.is_stopped())
-        self.chat._recent_history.assert_awaited_once()
-        self.chat._append.assert_awaited_once()
-        self.chat._generate.assert_not_awaited()
+        self.recent_history.assert_awaited_once()
+        self.append.assert_awaited_once()
+        self.generate.assert_not_awaited()
 
     async def test_command_failure_and_send_failure_do_not_fall_back_to_chat(self):
-        self.report._build_chain.side_effect = RuntimeError(
+        self.build_report.side_effect = RuntimeError(
             "expected mocked command failure"
         )
         event = self.event("#日报", "at")
@@ -310,25 +406,27 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
 
     async def test_observe_is_idempotent_and_keeps_pre_message_snapshot(self):
         history = [{"name": "earlier", "text": "old message", "ts": 1.0}]
-        self.chat._recent_history.return_value = history
+        self.recent_history.return_value = history
         event = self.event("current message")
         self.assertIs(await self.chat.observe(event), history)
         self.assertIs(await self.chat.observe(event), history)
-        self.chat._recent_history.assert_awaited_once()
-        self.chat._append.assert_awaited_once()
-        self.assertIn("current message", self.chat._append.await_args.args[1]["text"])
+        self.recent_history.assert_awaited_once()
+        self.append.assert_awaited_once()
+        assert self.append.await_args is not None
+        self.assertIn("current message", self.append.await_args.args[1]["text"])
         await self.chat.handle(event)
-        self.assertIs(self.chat._generate.await_args.args[6], history)
-        self.assertEqual(self.chat._recent_history.await_count, 1)
-        self.assertEqual(self.chat._append.await_count, 2)
+        assert self.generate.await_args is not None
+        self.assertIs(self.generate.await_args.args[6], history)
+        self.assertEqual(self.recent_history.await_count, 1)
+        self.assertEqual(self.append.await_count, 2)
         self.assertEqual(
             history, [{"name": "earlier", "text": "old message", "ts": 1.0}]
         )
 
     async def test_emoji_response_records_before_reply_without_llm(self):
         async def reply(event):
-            self.chat._recent_history.assert_awaited_once()
-            self.chat._append.assert_awaited_once()
+            self.recent_history.assert_awaited_once()
+            self.append.assert_awaited_once()
             return MessageChain().message("emoji response")
 
         emoji = SimpleNamespace(
@@ -342,9 +440,9 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         await self.dispatch(event)
         self.assertTrue(event.is_stopped())
         event.send.assert_awaited_once()
-        self.chat._generate.assert_not_awaited()
+        self.generate.assert_not_awaited()
         await self.dispatch(event)
-        self.chat._append.assert_awaited_once()
+        self.append.assert_awaited_once()
 
     async def test_disabled_chat_leaves_automatic_responder_working(self):
         self.plugin.config["active_chat"]["enable"] = False
@@ -361,7 +459,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         with patch.object(entry.logger, "exception"):
             await self.dispatch(event)
         event.send.assert_awaited_once()
-        self.chat._generate.assert_not_awaited()
+        self.generate.assert_not_awaited()
 
     async def test_terminate_closes_bound_renderer_after_module_failure(self):
         failing = SimpleNamespace(

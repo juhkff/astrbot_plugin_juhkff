@@ -5,12 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from typing import Any, cast
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from juhkff_modules import emoji_steal
 
 
-def make_event(umo="test:GroupMessage:123", message_type="GroupMessage", images=()):
+def make_event(
+    umo="test:GroupMessage:123", message_type="GroupMessage", images=()
+) -> Any:
     """Build a group or private event without any platform connection.
 
     Args:
@@ -38,13 +41,19 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         self.context = SimpleNamespace(llm_generate=AsyncMock())
         self.config = {}
         self.module = emoji_steal.EmojiStealModule(
-            SimpleNamespace(config={"emoji_steal": self.config}, context=self.context)
+            cast(
+                Any,
+                SimpleNamespace(
+                    config={"emoji_steal": self.config}, context=self.context
+                ),
+            )
         )
         self.module._root = self.base / "emoji"
         self.module._root.mkdir()
         self.module._save = Mock()
-        self.module._rng = Mock()
-        self.module._rng.random.return_value = 1.0
+        self.rng = Mock()
+        self.module._rng = self.rng
+        self.rng.random.return_value = 1.0
         self.paths = patch.object(emoji_steal, "data_dir", return_value=self.base)
         self.paths.start()
         self.addCleanup(self.paths.stop)
@@ -93,6 +102,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
                     expected,
                 )
         self.assertEqual(self.context.llm_generate.await_count, len(cases))
+        assert self.context.llm_generate.await_args is not None
         self.assertEqual(
             self.context.llm_generate.await_args.kwargs["chat_provider_id"],
             "test-provider",
@@ -162,7 +172,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(await self.module.handle(event))
         self.module._collect.assert_not_awaited()
         self.module._local_gallery.assert_not_called()
-        self.module._rng.random.assert_not_called()
+        self.rng.random.assert_not_called()
 
     async def test_invalid_event_origins_skip_before_collection(self):
         self.module._collect = AsyncMock()
@@ -185,12 +195,15 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         )
         for origin in origins:
             with self.subTest(origin=origin):
-                self.assertIsNone(await self.module.handle(make_event(origin)))
+                self.assertIsNone(
+                    await self.module.handle(make_event(cast(Any, origin)))
+                )
         self.module._collect.assert_not_awaited()
-        self.module._rng.random.assert_not_called()
+        self.rng.random.assert_not_called()
 
     async def test_benign_group_ids_preserve_raw_probability_and_index_identity(self):
         self.module._collect = AsyncMock()
+        assert self.module._root is not None
         for group in (
             "123",
             "-1001234567890",
@@ -207,7 +220,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
                     self.module._gallery_dir(group), self.module._root / group
                 )
                 self.assertIsNone(await self.module.handle(make_event(umo)))
-                self.module._collect.assert_awaited_with(unittest.mock.ANY, group, umo)
+                self.module._collect.assert_awaited_with(ANY, group, umo)
 
     async def test_direct_collection_rejects_unsafe_group_before_reading_images(self):
         event = make_event(images=[self.image])
@@ -217,6 +230,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         self.image.convert_to_file_path.assert_not_awaited()
         self.assertEqual(self.module._index, {})
         self.assertEqual(self.module._prints, {})
+        assert self.module._root is not None
         self.assertEqual(list(self.module._root.iterdir()), [])
 
     async def test_negative_group_id_collects_without_rewriting_keys(self):
@@ -230,6 +244,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_persisted_groups_and_filenames_are_skipped_and_pruned(self):
         outside = self.base / "outside.png"
         outside.write_bytes(b"outside")
+        assert self.module._root is not None
         directory = self.module._root / "123"
         directory.mkdir()
         valid = directory / "valid.png"
@@ -246,25 +261,31 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
             "bad\x00file.png",
             "",
         )
-        self.module._index = {
-            "123": {
-                **{
-                    str(index): {"file": file}
-                    for index, file in enumerate(invalid_files)
+        self.module._index = cast(
+            Any,
+            {
+                "123": {
+                    **{
+                        str(index): {"file": file}
+                        for index, file in enumerate(invalid_files)
+                    },
+                    "good": {"file": "valid.png"},
+                    "malformed": None,
                 },
-                "good": {"file": "valid.png"},
-                "malformed": None,
+                "..": {"escape": {"file": "outside.png"}},
+                "../escape": {"escape": {"file": "outside.png"}},
+                "C:": {"escape": {"file": "outside.png"}},
+                "bad-shape": [],
             },
-            "..": {"escape": {"file": "outside.png"}},
-            "../escape": {"escape": {"file": "outside.png"}},
-            "C:": {"escape": {"file": "outside.png"}},
-            "bad-shape": [],
-        }
-        self.module._prints = {
-            "123": {"good": {"first": 1e20}, "malformed": None},
-            "..": {"escape": {"first": 1e20}},
-            "../escape": {"escape": {"first": 1e20}},
-        }
+        )
+        self.module._prints = cast(
+            Any,
+            {
+                "123": {"good": {"first": 1e20}, "malformed": None},
+                "..": {"escape": {"first": 1e20}},
+                "../escape": {"escape": {"first": 1e20}},
+            },
+        )
         self.assertEqual(self.module._gallery_files("123"), [valid])
         self.assertEqual(self.module._gallery_files(".."), [])
         self.module._prune()
@@ -276,6 +297,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         self.config["max_per_group"] = 1
         outside = self.base / "outside.png"
         outside.write_bytes(b"outside")
+        assert self.module._root is not None
         directory = self.module._root / "123"
         directory.mkdir()
         old, new = directory / "old.png", directory / "new.png"
@@ -303,6 +325,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         outside = self.base / "outside"
         outside.mkdir()
         (outside / "sticker.png").write_bytes(b"outside")
+        assert self.module._root is not None
         (self.module._root / "linked").symlink_to(outside, target_is_directory=True)
         self.module._index = {"linked": {"x": {"file": "sticker.png"}}}
         self.module._prints = {"linked": {"x": {"first": 1e20}}}
@@ -322,6 +345,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
     async def test_symlink_image_is_not_read_overwritten_or_deleted(self):
         outside = self.base / "outside.png"
         outside.write_bytes(b"outside")
+        assert self.module._root is not None
         directory = self.module._root / "123"
         directory.mkdir()
         digest = hashlib.sha256(self.data).hexdigest()
@@ -345,11 +369,14 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         sticker = local / "sticker.png"
         sticker.write_bytes(b"local")
         self.module._index = {"123": {"bad": {"file": "../../outside.png"}}}
-        self.module._rng.random.return_value = 0.0
-        self.module._rng.uniform.return_value = 0.0
-        self.module._rng.choice.side_effect = lambda files: files[0]
+        self.rng.random.return_value = 0.0
+        self.rng.uniform.return_value = 0.0
+        self.rng.choice.side_effect = lambda files: files[0]
         result = await self.module.handle(make_event())
-        self.assertEqual(result.chain[0].path, str(sticker))
+        assert result is not None
+        image = result.chain[0]
+        assert isinstance(image, emoji_steal.Image)
+        self.assertEqual(image.path, str(sticker))
         self.context.llm_generate.assert_not_awaited()
 
 

@@ -4,6 +4,7 @@ import asyncio
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 from juhkff_modules import renderer
@@ -39,9 +40,9 @@ class RendererTests(unittest.IsolatedAsyncioTestCase):
         self.renderer = renderer.LocalHtmlRenderer()
         self.start = AsyncMock()
         self.factory = Mock(return_value=SimpleNamespace(start=self.start))
-        api = ModuleType("playwright.async_api")
+        api: Any = ModuleType("playwright.async_api")
         api.async_playwright = self.factory
-        playwright = ModuleType("playwright")
+        playwright: Any = ModuleType("playwright")
         playwright.async_api = api
         self.modules = patch.dict(
             sys.modules, {"playwright": playwright, "playwright.async_api": api}

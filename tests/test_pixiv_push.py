@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, patch
 
@@ -24,7 +25,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.groups = ["test:GroupMessage:1", "test:GroupMessage:2"]
-        self.plugin = SimpleNamespace(
+        self.plugin: Any = SimpleNamespace(
             global_enabled=True,
             config={
                 "global": {"enabled": True, "proxy": "http://127.0.0.1:7890"},
@@ -52,7 +53,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             await module.stop()
 
     @staticmethod
-    def item(illust_id="2", pages=1):
+    def item(illust_id: str = "2", pages: int = 1) -> pixiv.Illustration:
         return {
             "id": illust_id,
             "title": f"Work {illust_id}",
@@ -71,6 +72,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             pixiv, "fetch_json", AsyncMock(return_value=response)
         ) as fetch:
             self.assertEqual(await self.module._fetch_ids("7"), ["2", "10"])
+        assert fetch.await_args is not None
         self.assertEqual(fetch.await_args.kwargs["allowed_hosts"], {"www.pixiv.net"})
 
     async def test_detail_and_pages_reject_foreign_or_private_image_urls(self):
@@ -111,7 +113,8 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             pixiv, "fetch_bytes", AsyncMock(return_value=self.payload)
         ) as fetch:
             path = await self.module._download(item, item, 0, "7")
-            self.assertIsNotNone(path)
+            assert path is not None
+            assert fetch.await_args is not None
             self.assertEqual(path.read_bytes(), self.payload)
             self.assertEqual(fetch.await_args.args[0], item["original"])
             self.assertEqual(fetch.await_args.kwargs["max_bytes"], 64 * 1024 * 1024)
@@ -175,6 +178,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         fresh._fetch_ids = AsyncMock(return_value=["1", "2", "9"])
         self.modules.append(fresh)
         await fresh.start()
+        assert fresh._baseline_task is not None
         await fresh._baseline_task
         self.assertEqual(fresh._artists["7"], {"last_id": "9", "delivered": {}})
         self.assertEqual(fresh._subscriptions()["7"], self.groups)
@@ -189,6 +193,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         reloaded._fetch_ids = AsyncMock()
         self.modules.append(reloaded)
         await reloaded.start()
+        assert reloaded._baseline_task is not None
         await reloaded._baseline_task
         self.assertEqual(reloaded._artists, self.module._artists)
         self.assertEqual(reloaded._due, self.module._due)
@@ -227,15 +232,15 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             await release.wait()
             return self.image
 
-        self.module._download = download
-        task = asyncio.create_task(self.module._check_artist("7"))
-        try:
-            await asyncio.wait_for(entered.wait(), 1)
-            self.module.cfg["subscriptions"] = []
-            self.module._artists.clear()
-        finally:
-            release.set()
-            await task
+        with patch.object(self.module, "_download", new=download):
+            task = asyncio.create_task(self.module._check_artist("7"))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                self.module.cfg["subscriptions"] = []
+                self.module._artists.clear()
+            finally:
+                release.set()
+                await task
         self.plugin.context.send_message.assert_not_awaited()
         self.assertEqual(self.module._artists, {})
 

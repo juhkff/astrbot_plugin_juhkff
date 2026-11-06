@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, patch
 
@@ -26,6 +27,7 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
                 params={"text": "a b&c", "tag": ["x", "y"]},
                 allowed_hosts={"example.com"},
             )
+        assert request.await_args is not None
         self.assertEqual(result, {"ok": True})
         self.assertEqual(
             request.await_args.args[0],
@@ -43,10 +45,11 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
             self.assertIs(
                 await common.download_image_bytes("https://example.com/a"), payload
             )
+        assert request.await_args is not None
         self.assertEqual(request.await_args.kwargs["max_bytes"], 64 * 1024 * 1024)
 
     async def test_active_tool_rejects_private_ports_and_schemes_before_dns(self):
-        plugin = SimpleNamespace(
+        plugin: Any = SimpleNamespace(
             config={"global": {"enabled": True}, "active_chat": {"enable": True}}
         )
         module = active_chat.ActiveChatModule(plugin)
@@ -61,7 +64,7 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
                     await module._fetch_public_page(url)
 
     async def test_active_tool_uses_global_proxy_and_bounded_original_text(self):
-        plugin = SimpleNamespace(
+        plugin: Any = SimpleNamespace(
             config={
                 "global": {"enabled": True, "proxy": "http://127.0.0.1:7890"},
                 "active_chat": {"enable": True},
@@ -76,11 +79,12 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
             self.assertEqual(
                 await module._fetch_public_page("https://example.com/"), "中文正文"
             )
+        assert request.await_args is not None
         self.assertEqual(request.await_args.kwargs["proxy"], "http://127.0.0.1:7890")
         self.assertEqual(request.await_args.kwargs["max_bytes"], 300000)
 
     async def test_report_retains_environment_proxy_and_existing_error_fallbacks(self):
-        session = SimpleNamespace(headers={"User-Agent": "test"}, trust_env=True)
+        session: Any = SimpleNamespace(headers={"User-Agent": "test"}, trust_env=True)
         with patch.object(
             report_sources,
             "public_request",
@@ -95,6 +99,7 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
                     image=True,
                     referer="https://article.example/",
                 )
+        assert request.await_args is not None
         self.assertTrue(request.await_args.kwargs["trust_env"])
         self.assertEqual(request.await_args.kwargs["max_bytes"], 10 * 1024 * 1024)
         self.assertEqual(
@@ -110,7 +115,7 @@ class DailyReportTests(IsolatedAsyncioTestCase):
         patcher = patch.object(daily_report, "data_dir", return_value=self.folder)
         patcher.start()
         self.addCleanup(patcher.stop)
-        plugin = SimpleNamespace(
+        plugin: Any = SimpleNamespace(
             config={
                 "global": {"enabled": True},
                 "daily_report": {
@@ -162,6 +167,7 @@ class DailyReportTests(IsolatedAsyncioTestCase):
                 self.module._generate(), self.module._generate()
             )
         self.assertEqual(results[0], results[1])
+        assert results[0] is not None
         self.assertEqual(results[0].read_bytes(), b"PNG")
         self.module._collect.assert_awaited_once()
         render.assert_awaited_once()

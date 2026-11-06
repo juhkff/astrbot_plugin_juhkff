@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import random
 import re
@@ -149,6 +150,7 @@ class ActiveChatModule(BaseModule):
         # 网页正文缓存：url -> (抓取时间, 正文)。同一链接反复被工具调用时
         # 只抓一次，按不同「关注点」重新挑段落不额外走网络
         self._url_cache: dict[str, tuple[float, str]] = {}
+        self._stop_signal = asyncio.Event()
 
     def help_entries(self):
         return [
@@ -168,6 +170,7 @@ class ActiveChatModule(BaseModule):
         )
 
     async def stop(self) -> None:
+        self._stop_signal.set()
         # 退出前断开连接；不断开的话 AstrBot 热重载会留下半死连接
         if self._redis is not None:
             try:
@@ -309,7 +312,7 @@ class ActiveChatModule(BaseModule):
             when the event is ineligible. A snapshot on the event prevents duplicate
             appends; Redis remains the only persistent history store.
         """
-        if not self.enabled:
+        if not self.enabled or self._stop_signal.is_set():
             return None
         # Command matches take precedence even when the message also mentions
         # or quotes the bot. Skip before reading or writing Redis history.
@@ -337,11 +340,13 @@ class ActiveChatModule(BaseModule):
             for seg in (event.message_obj.message or [])
             if isinstance(seg, Plain)
         ).strip()
-        command_prefixes = ("#", "/") + tuple(
+        prefixes: list[str] = ["#", "/"]
+        prefixes.extend(
             prefix
             for prefix in self.plugin.context.get_config(umo).get("wake_prefix", ["/"])
-            if prefix
+            if isinstance(prefix, str) and prefix
         )
+        command_prefixes = tuple(prefixes)
         if text.startswith(command_prefixes) or raw_text.startswith(command_prefixes):
             return None
         if event.is_at_or_wake_command and not called:
@@ -427,6 +432,28 @@ class ActiveChatModule(BaseModule):
             # 已经掷到「要回」但生成失败（没配模型/请求报错）：结束事件，
             # 否则框架的默认对话会补一句，而且那句不会进我们的历史
             event.stop_event()
+            return None
+
+        # Claim the event before waiting so another responder cannot reply.
+        event.stop_event()
+        bounds = self.cfg.get("send_delay") or {}
+        if not isinstance(bounds, dict):
+            bounds = {}
+        seconds: list[float] = []
+        for key, default in (("min_seconds", 1.0), ("max_seconds", 3.0)):
+            try:
+                value = float(bounds.get(key, default))
+            except (TypeError, ValueError, OverflowError):
+                value = default
+            seconds.append(max(0.0, value) if math.isfinite(value) else default)
+        delay = random.uniform(*sorted(seconds))
+        if delay > 0:
+            try:
+                await asyncio.wait_for(self._stop_signal.wait(), timeout=delay)
+                return None
+            except asyncio.TimeoutError:
+                pass
+        if self._stop_signal.is_set() or not self.enabled:
             return None
 
         # 先发出去，发送成功之后才把「我」写进历史：否则群里没出现的话

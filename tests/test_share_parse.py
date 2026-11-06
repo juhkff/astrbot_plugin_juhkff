@@ -11,6 +11,7 @@ import unittest
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -48,6 +49,8 @@ class FakeImage:
 
 
 class FakeBaseModule:
+    key: str
+
     def __init__(self, plugin):
         self.plugin = plugin
 
@@ -69,19 +72,21 @@ def load_share_module():
     package_name = "_juhkff_share_parse_tests"
     package = types.ModuleType(package_name)
     package.__path__ = []
-    common = types.ModuleType(package_name + ".common")
+    common: Any = types.ModuleType(package_name + ".common")
     common.BaseModule = FakeBaseModule
     common.truncate = lambda text, limit: text[:limit]
-    events = types.ModuleType("astrbot.api.event")
+    events: Any = types.ModuleType("astrbot.api.event")
     events.AstrMessageEvent = object
     events.MessageChain = list
-    components = types.ModuleType("astrbot.api.message_components")
+    components: Any = types.ModuleType("astrbot.api.message_components")
     components.At = FakeAt
     components.Image = FakeImage
     components.Json = FakeJson
     components.Plain = FakePlain
     path = Path(__file__).resolve().parents[1] / "juhkff_modules" / "share_parse.py"
     spec = importlib.util.spec_from_file_location(package_name + ".share_parse", path)
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     with patch.dict(
         sys.modules,
@@ -209,6 +214,7 @@ class ShareParseTests(unittest.IsolatedAsyncioTestCase):
                     "https://www.bilibili.com/video/" + video_id
                 )
                 self.assertEqual(cover, COVER_URL)
+                assert request.await_args is not None
                 api = request.await_args.args[0]
                 self.assertEqual(urlsplit(api).hostname, "api.bilibili.com")
                 self.assertEqual(parse_qs(urlsplit(api).query), {parameter: [value]})
@@ -270,6 +276,7 @@ class ShareParseTests(unittest.IsolatedAsyncioTestCase):
         image = next(part for part in parts if isinstance(part, FakeImage))
         self.assertEqual(image.file, "base64://" + base64.b64encode(payload).decode())
         self.assertFalse(image.file.startswith(("http://", "https://")))
+        assert request.await_args is not None
         self.assertEqual(request.await_args.args[0], COVER_URL)
         self.assertEqual(request.await_args.kwargs["max_bytes"], 10 * 1024 * 1024)
         self.assertEqual(request.await_args.kwargs["proxy"], self.module.proxy)
@@ -312,6 +319,7 @@ class ShareParseTests(unittest.IsolatedAsyncioTestCase):
                 "generic",
             )
         self.assert_text_only(parts)
+        assert request.await_args is not None
         self.assertEqual(request.await_args.kwargs["max_bytes"], 10 * 1024 * 1024)
 
     async def test_private_preview_rejected_before_any_http(self):

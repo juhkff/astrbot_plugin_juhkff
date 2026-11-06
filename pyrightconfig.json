@@ -1,5 +1,9 @@
 {
   "pythonVersion": "3.12",
-  "reportImplicitRelativeImport": "none",
-  "reportMissingImports": "none"
+  "typeCheckingMode": "standard",
+  "venvPath": "../../..",
+  "venv": ".venv",
+  "extraPaths": ["../../..", "."],
+  "include": ["main.py", "juhkff_modules", "tests"],
+  "reportImplicitRelativeImport": "none"
 }

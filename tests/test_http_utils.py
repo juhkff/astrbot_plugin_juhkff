@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import unittest
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch, sentinel
 
 from juhkff_modules import http_utils
@@ -189,7 +190,9 @@ class PublicRequestTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("ssl", options)  # aiohttp's verified TLS default.
                 self.assertFalse(self.session_options[-1]["trust_env"])
                 self.assertTrue(self.session_options[-1]["auto_decompress"])
-                http_utils.aiohttp.TCPConnector.assert_called_with(force_close=True)
+                cast(Any, http_utils.aiohttp.TCPConnector).assert_called_with(
+                    force_close=True
+                )
 
     async def test_environment_proxy_and_no_proxy_use_each_logical_url(self):
         self.responses = [
@@ -399,12 +402,15 @@ class PublicRequestTests(unittest.IsolatedAsyncioTestCase):
         ) as deadline:
             await http_utils.public_request("https://public.example/", timeout=7)
         deadline.assert_called_once()
+        assert deadline.call_args is not None
         self.assertEqual(deadline.call_args.kwargs["timeout"], 7)
 
     async def test_invalid_limits_and_url_do_not_create_http_session(self):
         for kwargs in ({"timeout": 0}, {"timeout": float("inf")}, {"max_bytes": 0}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                await http_utils.public_request("https://public.example/", **kwargs)
+                await http_utils.public_request(
+                    "https://public.example/", **cast(dict[str, Any], kwargs)
+                )
         with self.assertRaises(ValueError):
             await http_utils.public_request("https://user:secret@public.example/")
         self.assertEqual(self.sessions, [])

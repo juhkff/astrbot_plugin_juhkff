@@ -65,6 +65,25 @@
         "default": true,
         "hint": "被 @ 或引用机器人消息时直接接话；关闭后仍按概率，指令除外。"
       },
+      "send_delay": {
+        "description": "延迟发送时间",
+        "type": "object",
+        "hint": "回复生成后，在范围内随机等待再发送，单位为秒；两项均为 0 时立即发送，顺序填反时自动交换。",
+        "items": {
+          "min_seconds": {
+            "description": "最短时间（秒）",
+            "type": "float",
+            "default": 1.0,
+            "hint": "非负数，支持小数。"
+          },
+          "max_seconds": {
+            "description": "最长时间（秒）",
+            "type": "float",
+            "default": 3.0,
+            "hint": "非负数；与最短时间相同则固定等待此时长。"
+          }
+        }
+      },
       "group_chat_rate": {
         "description": "分群接话设置",
         "type": "template_list",

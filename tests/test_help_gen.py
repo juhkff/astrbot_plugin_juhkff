@@ -6,9 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from juhkff_modules import help_gen, renderer
+
+from astrbot.api.message_components import Image, Plain
 
 
 class HelpGenTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +36,7 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
                 )
             },
         )
-        self.module = help_gen.HelpGenModule(plugin)
+        self.module = help_gen.HelpGenModule(cast(Any, plugin))
         self.paths = patch.object(help_gen, "data_dir", return_value=self.base)
         self.paths.start()
         self.addCleanup(self.paths.stop)
@@ -147,7 +150,7 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_replies_render_fresh_images_and_preserve_both(self):
         for index in range(30):
             self.create_image(f"help_{index}.png", self.now - 7200 + index)
-        event = SimpleNamespace(plain_result=Mock())
+        event: Any = SimpleNamespace(plain_result=Mock())
         render = AsyncMock(side_effect=[b"first png", b"second png"])
         with (
             patch.object(renderer, "render_template", new=render),
@@ -156,21 +159,29 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
             first, second = await asyncio.gather(
                 self.module._reply(event), self.module._reply(event)
             )
-        paths = [Path(first.chain[0].path), Path(second.chain[0].path)]
+        first_image, second_image = first.chain[0], second.chain[0]
+        assert isinstance(first_image, Image)
+        assert isinstance(second_image, Image)
+        assert first_image.path is not None
+        assert second_image.path is not None
+        paths = [Path(first_image.path), Path(second_image.path)]
         self.assertNotEqual(*paths)
         self.assertEqual(
             [path.read_bytes() for path in paths], [b"first png", b"second png"]
         )
         self.assertEqual(render.await_count, 2)
+        assert render.await_args is not None
         self.assertEqual(
             render.await_args.kwargs,
             {"scale": 2, "viewport": {"width": 880, "height": 900}},
         )
-        self.assertEqual(first.chain[1].text, "这是当前已启用功能的使用说明。")
+        text = first.chain[1]
+        assert isinstance(text, Plain)
+        self.assertEqual(text.text, "这是当前已启用功能的使用说明。")
         event.plain_result.assert_not_called()
 
     async def test_render_failure_keeps_existing_error_reply(self):
-        event = SimpleNamespace(plain_result=Mock(return_value="render error"))
+        event: Any = SimpleNamespace(plain_result=Mock(return_value="render error"))
         with patch.object(
             renderer, "render_template", new=AsyncMock(return_value=None)
         ):
