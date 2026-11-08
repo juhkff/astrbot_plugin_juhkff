@@ -107,6 +107,26 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
         )
 
 
+class ActiveChatContextTests(IsolatedAsyncioTestCase):
+    async def test_history_keeps_user_metadata_but_assistant_reply_verbatim(self):
+        plugin: Any = SimpleNamespace(config={"active_chat": {"enable": True}})
+        module = active_chat.ActiveChatModule(plugin)
+        for stamp in ("14:29", "11-07 14:29"):
+            with self.subTest(stamp=stamp), patch.object(
+                module, "_format_ts", return_value=stamp
+            ):
+                contexts = module._build_contexts(
+                    [
+                        {"name": "群友", "text": "几点开会", "ts": 1},
+                        {"self": True, "text": "14:30 开会", "ts": 2},
+                    ]
+                )
+                self.assertEqual(contexts[0].role, "user")
+                self.assertEqual(contexts[0].content[0].text, f"{stamp} 群友：几点开会")
+                self.assertEqual(contexts[1].role, "assistant")
+                self.assertEqual(contexts[1].content[0].text, "14:30 开会")
+
+
 class DailyReportTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = TemporaryDirectory()

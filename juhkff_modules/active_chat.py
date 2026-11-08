@@ -75,7 +75,9 @@ from .http_utils import public_request
 
 DEFAULT_PROMPT = (
     "你在一个QQ群聊里，扮演一名普通群员参与聊天。\n"
-    "只输出一条要发到群里的消息：不要用括号写动作或旁白，不要换行，不要以「回复xx」开头，句尾不加标点；不要解释思路，也不要带日期和昵称。\n"
+    "只输出一条要发到群里的消息：不要用括号写动作或旁白，不要换行，不要以「回复xx」开头，句尾不加标点；不要解释思路，也不要添加日期、时间戳或发言人标签作为前缀。\n"
+    "输入消息前的时间（如14:29、11-08 14:29）和发言人标签只是聊天记录的元信息，"
+    "用于理解上下文，不是回复格式；不要模仿或复述这些前缀。正文中正常谈论时间不受此限制。\n"
     "你在群里的昵称是{{botName}}。\n"
     "\n"
     "请像普通群员那样接着最新这条说一句话，只输出要发的内容本身。\n"
@@ -693,10 +695,8 @@ class ActiveChatModule(BaseModule):
             if not text:
                 continue
             if item.get("self"):
-                # 自己的话也带时间，时间只用于喂模型，不影响真正发出去的消息
-                stamp = self._format_ts(item.get("ts"))
-                said = f"{stamp} {text}" if stamp else text
-                contexts.append(AssistantMessageSegment(content=[TextPart(text=said)]))
+                # assistant 历史只保留实际回复，避免模型模仿额外添加的时间前缀。
+                contexts.append(AssistantMessageSegment(content=[TextPart(text=text)]))
                 continue
             stamp = self._format_ts(item.get("ts"))
             head = (
