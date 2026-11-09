@@ -1,4 +1,4 @@
-"""juhkff 综合插件：主动群聊 / 卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图。
+"""juhkff 综合插件：卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图。
 
 移植自 Yunzai 插件 juhkff-plugin（https://github.com/juhkff/juhkff-plugin）。
 
@@ -9,7 +9,7 @@
 1. `JuhkffPlugin.__init__` —— 模块注册表；
 2. `_dispatch` —— 一条消息如何分发给各模块；
 3. `juhkff_modules/common.py` —— 配置、定时器、模块基类；
-4. 各功能模块（active_chat / share_parse / emoji_steal / daily_report /
+4. 各功能模块（share_parse / emoji_steal / daily_report /
    pixiv_push / help_gen）。
 """
 
@@ -35,7 +35,6 @@ for _name, _module in list(sys.modules.items()):
         del sys.modules[_name]
 
 from juhkff_modules import common  # noqa: E402
-from juhkff_modules.active_chat import ActiveChatModule  # noqa: E402
 from juhkff_modules.daily_report import DailyReportModule  # noqa: E402
 from juhkff_modules.emoji_steal import EmojiStealModule  # noqa: E402
 from juhkff_modules.help_gen import HelpGenModule  # noqa: E402
@@ -58,7 +57,7 @@ VERSION = "0.1.0"
 @register(
     "astrbot_plugin_juhkff",
     "juhkff",
-    "综合功能插件：主动群聊 / 卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图",
+    "综合插件：卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图",
     VERSION,
 )
 class JuhkffPlugin(Star):
@@ -81,7 +80,6 @@ class JuhkffPlugin(Star):
         self.modules = {
             mod.key: mod
             for mod in (
-                ActiveChatModule(self),
                 ShareParseModule(self),
                 EmojiStealModule(self),
                 DailyReportModule(self),
@@ -109,12 +107,11 @@ class JuhkffPlugin(Star):
         """启动所有启用模块（幂等）。
 
         只启动 `enabled` 为真的模块：它们会在 `start()` 里注册定时任务、
-        连 Redis、初始化状态文件等；单个模块失败不影响其它模块。
+        初始化状态文件等；单个模块失败不影响其它模块。
 
         为什么除了 `on_astrbot_loaded` 还要在消息入口再调一次：那个钩子只在
         AstrBot **进程启动**时触发，WebUI 热重载插件（保存配置、禁用再启用）
-        不会重新触发。不补这一下，热重载后 Redis 不会连、定时任务不会注册，
-        主动群聊的历史就永远是 0 条。
+        不会重新触发。不补这一下，热重载后定时任务不会注册。
         """
         if self._started:
             return
@@ -160,7 +157,7 @@ class JuhkffPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def _dispatch(self, event: AstrMessageEvent) -> AsyncGenerator[None, None]:
-        """Route commands before passive handlers and active chat.
+        """Route commands before passive handlers.
 
         Args:
             event: Incoming message after AstrBot's wake and command checks.
@@ -177,20 +174,6 @@ class JuhkffPlugin(Star):
             return
         enabled = [mod for mod in self.modules.values() if mod.enabled]
         exclusive = [mod for mod in enabled if mod.intercepts(event)]
-        # Observe eligible conversations before another automatic module consumes
-        # the event. Command messages remain outside history and reply generation.
-        chat = self.modules.get("active_chat")
-        if (
-            not exclusive
-            and chat is not None
-            and isinstance(chat, ActiveChatModule)
-            and chat.enabled
-        ):
-            try:
-                await chat.observe(event)
-            except Exception:
-                logger.exception("[juhkff] Failed to record incoming chat history")
-        enabled.sort(key=lambda mod: mod.key == "active_chat")
         for mod in exclusive or enabled:
             if not mod.enabled:
                 continue
@@ -205,8 +188,7 @@ class JuhkffPlugin(Star):
                     return
                 continue
             if chain is None:
-                # A command can finish silently; active chat sends its own reply.
-                # Neither case should fall through to another responder.
+                # A consumed command must not fall through to another responder.
                 if exclusive or event.is_stopped():
                     event.stop_event()
                     return

@@ -1,10 +1,7 @@
 name: astrbot_plugin_juhkff
-display_name: 综合功能插件
-short_desc: 主动群聊 / 卡片解析 / 偷表情 / 每日日报 / Pixiv 订阅
-desc: >-
-  移植自 Yunzai 插件 juhkff-plugin。将主动群聊、JSON 卡片解析、偷表情、
-  每日群聊日报、Pixiv 画师订阅五个功能聚合在一个插件中，配置页按功能分组，
-  每个功能可独立开关。
+display_name: 综合插件
+short_desc: 卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图
+desc: 提供分享卡片解析、偷表情、日报、Pixiv 画师订阅和帮助图，支持按功能独立开关。
 version: 0.1.0
 author: juhkff
 repo: https://github.com/juhkff/juhkff-plugin

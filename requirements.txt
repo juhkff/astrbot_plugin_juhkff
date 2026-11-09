@@ -7,6 +7,4 @@ playwright>=1.40.0
 # Pixiv uses AstrBot's aiohttp and Pillow; no Pixiv SDK or login is required.
 # psutil is provided by AstrBot and identifies process restarts.
 
-# 主动群聊历史存储（不装则无法记录历史）
-redis>=5.0.0
 lunar-python>=1.3.0

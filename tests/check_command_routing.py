@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Plain, Reply
@@ -26,7 +26,6 @@ from astrbot.core.star.star_handler import star_handlers_registry
 # The entrypoint must establish its import path and reload classes first.
 # isort: off
 from data.plugins.astrbot_plugin_juhkff import main as entry
-from juhkff_modules.active_chat import ActiveChatModule
 from juhkff_modules.daily_report import DailyReportModule
 from juhkff_modules.help_gen import HelpGenModule
 from juhkff_modules.pixiv_push import PixivPushModule
@@ -39,11 +38,6 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         self.plugin: Any = entry.JuhkffPlugin.__new__(entry.JuhkffPlugin)
         self.plugin.config = {
             "global": {"enabled": True},
-            "active_chat": {
-                "enable": True,
-                "default_chat_rate": 1,
-                "send_delay": {"min_seconds": 0, "max_seconds": 0},
-            },
             "daily_report": {"enable": True},
             "help": {"enable": True},
             "pixiv_push": {"enable": True},
@@ -53,18 +47,10 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         self.plugin.context = SimpleNamespace(get_config=lambda umo: self.core_config)
         self.plugin._started = True
         self.plugin.data_dir = Path("/tmp/juhkff-command-routing-test")
-        self.chat = ActiveChatModule(self.plugin)
-        self.recent_history = AsyncMock(return_value=[])
-        self.append = AsyncMock()
-        self.generate = AsyncMock(return_value="chat reply")
-        self.chat._recent_history = self.recent_history
-        self.chat._append = self.append
-        self.chat._generate = self.generate
-        self.chat._should_speak = Mock(return_value=True)
+        self.plugin.context.llm_generate = AsyncMock()
+        self.plugin.context.tool_loop_agent = AsyncMock()
         self.report = DailyReportModule(self.plugin)
-        self.build_report = AsyncMock(
-            return_value=MessageChain().message("report")
-        )
+        self.build_report = AsyncMock(return_value=MessageChain().message("report"))
         self.report._build_chain = self.build_report
         self.help = HelpGenModule(self.plugin)
         self.help_reply = AsyncMock(return_value=MessageChain().message("help"))
@@ -89,7 +75,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         )
         # Keep the original problematic registration order: routing must override it.
         self.plugin.modules = {
-            m.key: m for m in (self.chat, self.card, self.report, self.pixiv, self.help)
+            m.key: m for m in (self.card, self.report, self.pixiv, self.help)
         }
         self.stage = waking.WakingCheckStage()
         pipeline_context: Any = SimpleNamespace(
@@ -154,93 +140,8 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
             pass
 
     def assert_no_chat(self):
-        self.recent_history.assert_not_awaited()
-        self.append.assert_not_awaited()
-        self.generate.assert_not_awaited()
-
-    async def test_reply_delay_follows_generation_and_precedes_success_history(self):
-        self.plugin.config["active_chat"]["send_delay"] = {
-            "min_seconds": 5,
-            "max_seconds": 2,
-        }
-        event = self.event("hello", "at")
-
-        async def send(chain):
-            self.generate.assert_awaited_once()
-            self.assertTrue(event.is_stopped())
-            self.assertEqual(self.append.await_count, 1)
-
-        event.send.side_effect = send
-        with patch(
-            "juhkff_modules.active_chat.random.uniform", return_value=0.001
-        ) as draw:
-            await self.chat.handle(event)
-        draw.assert_called_once_with(2.0, 5.0)
-        event.send.assert_awaited_once()
-        assert self.append.await_args is not None
-        self.assertTrue(self.append.await_args.args[1]["self"])
-
-    async def test_zero_delay_does_not_wait(self):
-        event = self.event("hello")
-        with patch(
-            "juhkff_modules.active_chat.asyncio.wait_for", side_effect=AssertionError
-        ):
-            await self.chat.handle(event)
-        event.send.assert_awaited_once()
-
-    async def test_stop_interrupts_pending_reply_without_success_history(self):
-        self.plugin.config["active_chat"]["send_delay"] = {
-            "min_seconds": 60,
-            "max_seconds": 60,
-        }
-        event = self.event("hello")
-        task = asyncio.create_task(self.chat.handle(event))
-        await asyncio.sleep(0)
-        self.generate.assert_awaited_once()
-        event.send.assert_not_awaited()
-        self.assertFalse(task.done())
-        await self.chat.stop()
-        await asyncio.wait_for(task, 1)
-        event.send.assert_not_awaited()
-        self.assertEqual(self.append.await_count, 1)
-
-    async def test_cancellation_during_delay_does_not_send(self):
-        self.plugin.config["active_chat"]["send_delay"] = {
-            "min_seconds": 60,
-            "max_seconds": 60,
-        }
-        event = self.event("hello")
-        task = asyncio.create_task(self.chat.handle(event))
-        await asyncio.sleep(0)
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        event.send.assert_not_awaited()
-        self.assertEqual(self.append.await_count, 1)
-
-    async def test_delay_defaults_and_invalid_nonfinite_values_are_safe(self):
-        for config, expected in (
-            ({}, (1.0, 3.0)),
-            ({"min_seconds": -2, "max_seconds": 0}, (0.0, 0.0)),
-            ({"min_seconds": "bad", "max_seconds": float("inf")}, (1.0, 3.0)),
-        ):
-            with self.subTest(config=config):
-                self.plugin.config["active_chat"]["send_delay"] = config
-                event = self.event("hello")
-                with patch(
-                    "juhkff_modules.active_chat.random.uniform", return_value=0
-                ) as draw:
-                    await self.chat.handle(event)
-                draw.assert_called_once_with(*expected)
-                event.send.assert_awaited_once()
-
-    async def test_generation_failure_never_waits_or_sends(self):
-        self.generate.return_value = ""
-        event = self.event("hello")
-        with patch("juhkff_modules.active_chat.random.uniform") as draw:
-            await self.chat.handle(event)
-        draw.assert_not_called()
-        event.send.assert_not_awaited()
+        self.plugin.context.llm_generate.assert_not_awaited()
+        self.plugin.context.tool_loop_agent.assert_not_awaited()
 
     async def test_report_commands_with_or_without_mentions_and_replies(self):
         for address in (None, "at", "reply"):
@@ -335,11 +236,8 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         self.assertFalse(event.is_stopped())
         event.send.assert_not_awaited()
         self.assert_no_chat()
-        # The standalone active-chat guard must agree with dispatcher routing.
-        await self.chat.handle(event)
-        self.assert_no_chat()
 
-    async def test_unknown_prefixed_commands_never_enter_chat_history(self):
+    async def test_unknown_prefixed_commands_never_call_llm(self):
         for prefix in ("/", "#", "!"):
             for address in ("at", "reply"):
                 event = self.event(prefix + "unknown", address)
@@ -348,39 +246,34 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
                 self.assert_no_chat()
                 event.send.assert_not_awaited()
 
-    async def test_ordinary_conversation_still_runs_once(self):
+    async def test_ordinary_conversation_only_dispatches_normal_modules(self):
         for address in (None, "at", "reply"):
             event = self.event("你好，今天怎么样", address)
             await self.wake(event)
             await self.dispatch(event)
-            self.assertEqual(event.send.await_count, 1)
-            self.assertTrue(event.is_stopped())
-        self.assertEqual(self.generate.await_count, 3)
-        self.assertEqual(self.append.await_count, 6)
+            event.send.assert_not_awaited()
+            self.assertFalse(event.is_stopped())
         self.assertEqual(self.card.handle.await_count, 3)
+        self.assert_no_chat()
 
     async def test_plain_help_word_is_not_a_command_without_wakeup(self):
         event = self.event("帮助")
         await self.wake(event)
         await self.dispatch(event)
         self.help_reply.assert_not_awaited()
-        self.generate.assert_awaited_once()
+        self.assert_no_chat()
 
-    async def test_other_module_response_prevents_active_chat(self):
+    async def test_other_module_response_still_sends_and_stops(self):
         self.card.handle.return_value = MessageChain().message("card parsed")
         event = self.event("普通分享消息", "at")
         await self.wake(event)
         await self.dispatch(event)
         self.assertEqual(event.send.await_count, 1)
         self.assertTrue(event.is_stopped())
-        self.recent_history.assert_awaited_once()
-        self.append.assert_awaited_once()
-        self.generate.assert_not_awaited()
+        self.assert_no_chat()
 
     async def test_command_failure_and_send_failure_do_not_fall_back_to_chat(self):
-        self.build_report.side_effect = RuntimeError(
-            "expected mocked command failure"
-        )
+        self.build_report.side_effect = RuntimeError("expected mocked command failure")
         event = self.event("#日报", "at")
         await self.wake(event)
         with patch.object(entry.logger, "exception"):
@@ -404,62 +297,21 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         self.assert_no_chat()
         self.card.handle.assert_not_awaited()
 
-    async def test_observe_is_idempotent_and_keeps_pre_message_snapshot(self):
-        history = [{"name": "earlier", "text": "old message", "ts": 1.0}]
-        self.recent_history.return_value = history
-        event = self.event("current message")
-        self.assertIs(await self.chat.observe(event), history)
-        self.assertIs(await self.chat.observe(event), history)
-        self.recent_history.assert_awaited_once()
-        self.append.assert_awaited_once()
-        assert self.append.await_args is not None
-        self.assertIn("current message", self.append.await_args.args[1]["text"])
-        await self.chat.handle(event)
-        assert self.generate.await_args is not None
-        self.assertIs(self.generate.await_args.args[6], history)
-        self.assertEqual(self.recent_history.await_count, 1)
-        self.assertEqual(self.append.await_count, 2)
-        self.assertEqual(
-            history, [{"name": "earlier", "text": "old message", "ts": 1.0}]
-        )
-
-    async def test_emoji_response_records_before_reply_without_llm(self):
-        async def reply(event):
-            self.recent_history.assert_awaited_once()
-            self.append.assert_awaited_once()
-            return MessageChain().message("emoji response")
-
+    async def test_emoji_response_does_not_call_llm(self):
         emoji = SimpleNamespace(
             key="emoji_steal",
             enabled=True,
             intercepts=lambda event: False,
-            handle=AsyncMock(side_effect=reply),
+            handle=AsyncMock(return_value=MessageChain().message("emoji response")),
         )
-        self.plugin.modules = {"active_chat": self.chat, "emoji_steal": emoji}
+        self.plugin.modules = {"emoji_steal": emoji}
         event = self.event("ordinary group image")
         await self.dispatch(event)
         self.assertTrue(event.is_stopped())
         event.send.assert_awaited_once()
-        self.generate.assert_not_awaited()
         await self.dispatch(event)
-        self.append.assert_awaited_once()
-
-    async def test_disabled_chat_leaves_automatic_responder_working(self):
-        self.plugin.config["active_chat"]["enable"] = False
-        self.card.handle.return_value = MessageChain().message("card response")
-        event = self.event("ordinary message")
-        await self.dispatch(event)
-        event.send.assert_awaited_once()
+        emoji.handle.assert_awaited_once()
         self.assert_no_chat()
-
-    async def test_observation_failure_does_not_suppress_card_reply(self):
-        self.chat.observe = AsyncMock(side_effect=RuntimeError("observation failed"))
-        self.card.handle.return_value = MessageChain().message("card response")
-        event = self.event("ordinary message")
-        with patch.object(entry.logger, "exception"):
-            await self.dispatch(event)
-        event.send.assert_awaited_once()
-        self.generate.assert_not_awaited()
 
     async def test_terminate_closes_bound_renderer_after_module_failure(self):
         failing = SimpleNamespace(

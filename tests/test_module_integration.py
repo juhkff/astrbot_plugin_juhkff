@@ -12,7 +12,7 @@ from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
-from juhkff_modules import active_chat, common, daily_report, report_sources
+from juhkff_modules import common, daily_report, report_sources
 
 
 class HTTPIntegrationTests(IsolatedAsyncioTestCase):
@@ -48,41 +48,6 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
         assert request.await_args is not None
         self.assertEqual(request.await_args.kwargs["max_bytes"], 64 * 1024 * 1024)
 
-    async def test_active_tool_rejects_private_ports_and_schemes_before_dns(self):
-        plugin: Any = SimpleNamespace(
-            config={"global": {"enabled": True}, "active_chat": {"enable": True}}
-        )
-        module = active_chat.ActiveChatModule(plugin)
-        with patch("socket.getaddrinfo", side_effect=AssertionError("No DNS expected")):
-            for url in (
-                "http://127.0.0.1/",
-                "https://example.com:6185/",
-                "file:///etc/passwd",
-                "https://user:password@example.com",
-            ):
-                with self.subTest(url=url), self.assertRaises(ValueError):
-                    await module._fetch_public_page(url)
-
-    async def test_active_tool_uses_global_proxy_and_bounded_original_text(self):
-        plugin: Any = SimpleNamespace(
-            config={
-                "global": {"enabled": True, "proxy": "http://127.0.0.1:7890"},
-                "active_chat": {"enable": True},
-            }
-        )
-        module = active_chat.ActiveChatModule(plugin)
-        with patch.object(
-            active_chat,
-            "public_request",
-            AsyncMock(return_value=("中文正文".encode(), "https://example.com/")),
-        ) as request:
-            self.assertEqual(
-                await module._fetch_public_page("https://example.com/"), "中文正文"
-            )
-        assert request.await_args is not None
-        self.assertEqual(request.await_args.kwargs["proxy"], "http://127.0.0.1:7890")
-        self.assertEqual(request.await_args.kwargs["max_bytes"], 300000)
-
     async def test_report_retains_environment_proxy_and_existing_error_fallbacks(self):
         session: Any = SimpleNamespace(headers={"User-Agent": "test"}, trust_env=True)
         with patch.object(
@@ -105,26 +70,6 @@ class HTTPIntegrationTests(IsolatedAsyncioTestCase):
         self.assertEqual(
             request.await_args.kwargs["headers"]["Referer"], "https://article.example/"
         )
-
-
-class ActiveChatContextTests(IsolatedAsyncioTestCase):
-    async def test_history_keeps_user_metadata_but_assistant_reply_verbatim(self):
-        plugin: Any = SimpleNamespace(config={"active_chat": {"enable": True}})
-        module = active_chat.ActiveChatModule(plugin)
-        for stamp in ("14:29", "11-07 14:29"):
-            with self.subTest(stamp=stamp), patch.object(
-                module, "_format_ts", return_value=stamp
-            ):
-                contexts = module._build_contexts(
-                    [
-                        {"name": "群友", "text": "几点开会", "ts": 1},
-                        {"self": True, "text": "14:30 开会", "ts": 2},
-                    ]
-                )
-                self.assertEqual(contexts[0].role, "user")
-                self.assertEqual(contexts[0].content[0].text, f"{stamp} 群友：几点开会")
-                self.assertEqual(contexts[1].role, "assistant")
-                self.assertEqual(contexts[1].content[0].text, "14:30 开会")
 
 
 class DailyReportTests(IsolatedAsyncioTestCase):
