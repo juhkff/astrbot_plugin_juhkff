@@ -1,4 +1,4 @@
-"""juhkff 综合插件：卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图。
+"""juhkff 综合插件：主动群聊 / 卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图。
 
 移植自 Yunzai 插件 juhkff-plugin（https://github.com/juhkff/juhkff-plugin）。
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import AsyncGenerator
+from sys import maxsize
 
 # 让 `juhkff_modules` 无论被当作包还是普通模块加载都能导入。
 # （AstrBot 加载插件时用 importlib 按文件路径导入 main.py，包名可能不是插件目录名）
@@ -37,6 +38,7 @@ for _name, _module in list(sys.modules.items()):
 from juhkff_modules import common  # noqa: E402
 from juhkff_modules.daily_report import DailyReportModule  # noqa: E402
 from juhkff_modules.emoji_steal import EmojiStealModule  # noqa: E402
+from juhkff_modules.group_chat import GroupChatModule  # noqa: E402
 from juhkff_modules.help_gen import HelpGenModule  # noqa: E402
 from juhkff_modules.pixiv_push import PixivPushModule  # noqa: E402
 from juhkff_modules.renderer import renderer as html_renderer  # noqa: E402
@@ -49,6 +51,10 @@ from astrbot.api.event import (  # noqa: E402
     filter,
 )
 from astrbot.api.star import Context, Star, register  # noqa: E402
+from astrbot.core.config.runtime import current_message_config  # noqa: E402
+from astrbot.core.pipeline.process_stage.method.agent_request import (  # noqa: E402
+    AgentRequestSubStage,
+)
 
 # 版本号：开发期间固定为初代 0.1.0，不随功能变化调整。
 VERSION = "0.1.0"
@@ -57,7 +63,7 @@ VERSION = "0.1.0"
 @register(
     "astrbot_plugin_juhkff",
     "juhkff",
-    "综合插件：卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图",
+    "综合插件：主动群聊 / 卡片解析 / 偷表情 / 日报 / Pixiv 订阅 / 帮助图",
     VERSION,
 )
 class JuhkffPlugin(Star):
@@ -85,6 +91,7 @@ class JuhkffPlugin(Star):
                 DailyReportModule(self),
                 PixivPushModule(self),
                 HelpGenModule(self),
+                GroupChatModule(self),
             )
         }
         self._started = False
@@ -200,6 +207,73 @@ class JuhkffPlugin(Star):
             event.stop_event()
             return
         yield
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=maxsize)
+    async def _prepare_group_chat(self, event: AstrMessageEvent):
+        """Claim group admission before the built-in empty-mention handler.
+
+        Args:
+            event: Incoming group event.
+        """
+        await self.modules["group_chat"].prepare(event)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=-maxsize)
+    async def _admit_group_chat(self, event: AstrMessageEvent):
+        """Leave consumed messages to other plugins, then admit an agent turn.
+
+        Args:
+            event: Incoming group event.
+        """
+        module = self.modules["group_chat"]
+        request = await module.admit(event)
+        if module.cfg.get("framework") and event.get_extra("juhkff_group_admitted"):
+            # Initialize per event so Core's cached presentation options use this snapshot.
+            # Suppress the outer default branch even when the model produces no output.
+            event.should_call_llm(True)
+            if request is not None:
+                event.set_extra("provider_request", request)
+            scope = current_message_config.get()
+            if (
+                scope is None
+                or not scope.active
+                or scope.umo != event.unified_msg_origin
+            ):
+                raise RuntimeError("Group runtime lost its message configuration scope")
+            stage = AgentRequestSubStage()
+            await stage.initialize(scope.context)
+            async for _ in stage.process(event):
+                yield
+        elif request is not None:
+            yield request
+
+    @filter.on_llm_request()
+    async def _group_chat_context(self, event, request):
+        """Supplement official requests with the event's context snapshot.
+
+        Args:
+            event: Current group event.
+            request: Official model request.
+        """
+        await self.modules["group_chat"].decorate(event, request)
+
+    @filter.on_llm_response()
+    async def _group_chat_response(self, event, response):
+        """Capture generated text for the Redis group timeline.
+
+        Args:
+            event: Current group event.
+            response: Official model response.
+        """
+        await self.modules["group_chat"].capture_response(event, response)
+
+    @filter.after_message_sent()
+    async def _group_chat_cleanup(self, event):
+        """Clear context following successful official reset commands.
+
+        Args:
+            event: Sent event.
+        """
+        await self.modules["group_chat"].after_sent(event)
 
     # ------------------------------------------------------------ 指令
 

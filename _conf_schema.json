@@ -31,6 +31,587 @@
       }
     }
   },
+  "group_chat": {
+    "type": "object",
+    "description": "主动群聊",
+    "hint": "可禁用官方 astrbot 系统插件，仅由本模块负责群聊触发和 Redis 上下文；模型、人格与工具复用框架核心。历史不按时间过期，重启保留，不修改官方配置。",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "description": "启用",
+        "default": false,
+        "hint": "默认关闭。禁用官方 astrbot 后，本模块独立负责指定群的主动回复与群聊上下文。"
+      },
+      "groups": {
+        "type": "list",
+        "description": "生效群列表",
+        "default": [],
+        "_special": "umo",
+        "hint": "选择群聊，可多选，也可手动填写群号；留空应用于所有群，不影响私聊。"
+      },
+      "redis_url": {
+        "type": "string",
+        "description": "Redis 连接地址",
+        "default": "redis://localhost:6379/0",
+        "hint": "支持 redis://:密码@主机:端口/数据库 和 rediss://。需自行启动 Redis 服务；连接失败时不使用内存或数据库历史替代。"
+      },
+      "redis_prefix": {
+        "type": "string",
+        "description": "Redis 键前缀",
+        "default": "astrbot:juhkff:group_chat",
+        "hint": "历史保存在该前缀下；重置只清理对应会话。多个 AstrBot 实例应使用不同前缀，避免历史混用。"
+      },
+      "probability": {
+        "type": "float",
+        "description": "普通消息接话概率",
+        "default": 0.2,
+        "slider": {"min": 0, "max": 1, "step": 0.01},
+        "hint": "每条普通消息独立抽取，无接话冷却；0 禁止随机接话，@ 等核心唤醒仍由本模块安排回复。文字模式图片转述不受此概率限制。"
+      },
+      "image_mode": {
+        "type": "string",
+        "description": "群聊图片模式",
+        "default": "original",
+        "options": ["original", "caption"],
+        "labels": ["原图模式", "文字模式"],
+        "hint": "原图模式：直接读取当前和历史图片，需视觉模型。文字模式：先转成描述再聊天。两种模式均保留原图。"
+      },
+      "caption_settings": {
+        "type": "object",
+        "description": "文字模式设置",
+        "condition": {"image_mode": "caption"},
+        "items": {
+          "provider_id": {
+            "type": "string",
+            "description": "图片转述模型",
+            "default": "",
+            "_special": "select_provider",
+            "hint": "选择支持图片的模型；留空使用默认转述模型或当前聊天模型。每条图片消息都会转述，不受接话概率影响。"
+          },
+          "detect_meme": {
+            "type": "bool",
+            "description": "判断是否为表情包",
+            "default": true,
+            "hint": "开启：判断表情包并描述情绪或梗。关闭：只描述图片内容。不影响偷表情功能。"
+          }
+        }
+      },
+      "image_caption_provider_id": {
+        "type": "string",
+        "description": "旧版图片转述模型（兼容配置）",
+        "default": "",
+        "invisible": true
+      },
+      "framework": {
+        "type": "object",
+        "description": "框架运行设置",
+        "hint": "本模块群聊运行配置的权威来源：逐层覆盖本次消息的框架配置快照，不修改框架全局配置。默认值与当前框架一致，不自动导入框架自定义值；对话模型留空使用第一个已注册模型，人格 default 使用框架默认人格。图片模式及转述模型由上方图片模式与文字模式设置控制。",
+        "items": {
+          "agent": {
+            "type": "object",
+            "description": "内置 Agent",
+            "items": {
+              "runtime": {
+                "description": "执行器（固定内置）",
+                "type": "string",
+                "options": [
+                  "astrbot"
+                ],
+                "labels": [
+                  "内置 Agent"
+                ],
+                "hint": "群聊固定使用框架内置 Agent，不提供外部执行器。",
+                "default": "astrbot"
+              },
+              "config": {
+                "type": "object",
+                "description": "Agent 运行配置",
+                "items": {
+                  "model": {
+                    "type": "object",
+                    "description": "对话模型",
+                    "items": {
+                      "provider_id": {
+                        "description": "对话模型",
+                        "type": "string",
+                        "_special": "select_provider",
+                        "hint": "留空时使用第一个模型",
+                        "default": ""
+                      },
+                      "fallback_provider_ids": {
+                        "description": "回退对话模型",
+                        "type": "list",
+                        "items": {
+                          "type": "string"
+                        },
+                        "_special": "select_providers",
+                        "hint": "主聊天模型请求失败时，按顺序切换到这些模型。",
+                        "default": []
+                      },
+                      "request_max_retries": {
+                        "description": "异常重试次数",
+                        "type": "int",
+                        "hint": "单次模型请求遇到可重试错误时的最大尝试次数。",
+                        "default": 5
+                      }
+                    }
+                  },
+                  "persona": {
+                    "type": "object",
+                    "description": "人格",
+                    "items": {
+                      "persona_id": {
+                        "description": "默认采用的人格",
+                        "type": "string",
+                        "_special": "select_persona",
+                        "default": "default"
+                      },
+                      "safety_mode": {
+                        "description": "健康模式",
+                        "type": "bool",
+                        "hint": "引导模型输出健康、安全的内容，避免有害或敏感话题。",
+                        "default": true
+                      },
+                      "safety_mode_strategy": {
+                        "description": "健康模式策略",
+                        "type": "string",
+                        "invisible": true,
+                        "options": [
+                          "system_prompt"
+                        ],
+                        "hint": "选择健康模式的实现策略。",
+                        "condition": {
+                          "safety_mode": true
+                        },
+                        "default": "system_prompt"
+                      }
+                    }
+                  },
+                  "misc": {
+                    "type": "object",
+                    "description": "工具与执行",
+                    "items": {
+                      "max_steps": {
+                        "description": "工具调用轮数上限",
+                        "type": "int",
+                        "default": 128
+                      },
+                      "tool_schema_mode": {
+                        "description": "工具调用模式",
+                        "type": "string",
+                        "options": [
+                          "skills_like",
+                          "full"
+                        ],
+                        "labels": [
+                          "Skills-like（两阶段）",
+                          "Full（完整参数）"
+                        ],
+                        "hint": "skills-like 先下发工具名称与描述，再下发参数；full 一次性下发完整参数。",
+                        "default": "full"
+                      },
+                      "tool_call_timeout": {
+                        "description": "工具调用超时时间（秒）",
+                        "type": "int",
+                        "default": 120
+                      },
+                      "sanitize_context_by_modalities": {
+                        "description": "按模型能力清理历史上下文",
+                        "type": "bool",
+                        "hint": "开启后，在每次请求 LLM 前会按当前模型提供商中所选择的模型能力删除对话中不支持的图片/工具调用结构（会改变模型看到的历史）",
+                        "default": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "provider_settings": {
+            "type": "object",
+            "description": "核心输入与回复能力",
+            "items": {
+              "web_search": {
+                "description": "启用网页搜索",
+                "type": "bool",
+                "default": false
+              },
+              "websearch_provider": {
+                "description": "网页搜索提供商",
+                "type": "string",
+                "options": [
+                  "serpapi",
+                  "deepseek",
+                  "tavily",
+                  "baidu_ai_search",
+                  "bocha",
+                  "brave",
+                  "firecrawl",
+                  "exa",
+                  "anysearch"
+                ],
+                "labels": [
+                  "SerpApi",
+                  "DeepSeek Search API",
+                  "Tavily",
+                  "Baidu AI Search",
+                  "Bocha",
+                  "Brave",
+                  "Firecrawl",
+                  "Exa",
+                  "AnySearch"
+                ],
+                "subtitles": [
+                  "Google 网页、新闻、图片、学术和财经搜索",
+                  "DeepSeek 官方搜索接口",
+                  "",
+                  "",
+                  "",
+                  "",
+                  "",
+                  "",
+                  ""
+                ],
+                "condition": {
+                  "web_search": true
+                },
+                "default": "tavily"
+              },
+              "websearch_tavily_key": {
+                "description": "Tavily API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "可添加多个 Key 进行轮询。",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "tavily",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "websearch_bocha_key": {
+                "description": "BoCha API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "可添加多个 Key 进行轮询。",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "bocha",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "websearch_brave_key": {
+                "description": "Brave Search API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "可添加多个 Key 进行轮询。",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "brave",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "websearch_baidu_app_builder_key": {
+                "description": "百度千帆智能云 APP Builder API Key",
+                "type": "string",
+                "hint": "参考：https://console.bce.baidu.com/iam/#/iam/apikey/list",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "baidu_ai_search",
+                  "web_search": true
+                },
+                "default": ""
+              },
+              "websearch_firecrawl_key": {
+                "description": "Firecrawl API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "可添加多个 Key 进行轮询。",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "firecrawl",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "websearch_exa_key": {
+                "description": "Exa API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "可添加多个 Key 进行轮询。Get a key at https://dashboard.exa.ai",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "exa",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "websearch_anysearch_key": {
+                "description": "AnySearch API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "可添加多个 Key 进行轮询。留空则使用匿名模式（每日免费额度）。申请地址：https://anysearch.com/console/api-keys",
+                "condition": {
+                  "websearch_provider": "anysearch",
+                  "web_search": true
+                },
+                "default": [],
+                "secret": true
+              },
+              "websearch_deepseek_key": {
+                "description": "DeepSeek API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "Configure a DeepSeek API key for search and page extraction. Multiple keys rotate. Get a key: [https://platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "deepseek",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "websearch_serpapi_key": {
+                "description": "SerpApi API Key",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "hint": "支持 Google 网页、新闻、图片、学术和财经搜索。可添加多个 Key 轮询。获取 Key：[https://serpapi.com/manage-api-key](https://serpapi.com/manage-api-key)",
+                "secret": true,
+                "condition": {
+                  "websearch_provider": "serpapi",
+                  "web_search": true
+                },
+                "default": []
+              },
+              "web_search_link": {
+                "description": "显示来源引用",
+                "type": "bool",
+                "condition": {
+                  "web_search": true
+                },
+                "default": false
+              },
+              "display_reasoning_text": {
+                "description": "显示思考内容",
+                "hint": "显示模型的思维链信息到最终回复中。",
+                "type": "bool",
+                "default": false
+              },
+              "identifier": {
+                "description": "用户识别",
+                "type": "bool",
+                "hint": "在用户提示词前带上用户 ID 信息。",
+                "default": false
+              },
+              "group_name_display": {
+                "description": "显示群名称",
+                "type": "bool",
+                "hint": "在受支持的消息平台的群聊中的用户提示词前带上群名称信息。",
+                "default": false
+              },
+              "datetime_system_prompt": {
+                "description": "现实世界时间感知",
+                "type": "bool",
+                "hint": "在用户提示词中带上当前的时间信息。",
+                "default": true
+              },
+              "prompt_prefix": {
+                "description": "用户提示词",
+                "type": "string",
+                "hint": "可使用 {{prompt}} 作为用户输入的占位符。如果不输入占位符则代表添加在用户输入的前面。",
+                "collapsed": true,
+                "default": "{{prompt}}"
+              },
+              "streaming_response": {
+                "description": "流式输出",
+                "hint": "在受支持的聊天平台中以打字机的形式输出响应。",
+                "type": "bool",
+                "default": false
+              },
+              "show_tool_use_status": {
+                "description": "输出工具调用信息",
+                "hint": "有工具调用时，同时发送带有工具调用名字的消息。",
+                "type": "bool",
+                "default": false
+              },
+              "show_tool_call_result": {
+                "description": "输出工具调用结果",
+                "type": "bool",
+                "hint": "仅在输出工具调用信息启用时生效，展示结果前 70 个字符。",
+                "condition": {
+                  "show_tool_use_status": true
+                },
+                "default": false
+              },
+              "buffer_intermediate_messages": {
+                "description": "合并 Agent 中间消息",
+                "type": "bool",
+                "hint": "开启后，非流式模式下多步工具调用过程中产生的中间文本将缓冲，待 Agent 完成后合并为一条回复发送。",
+                "condition": {
+                  "streaming_response": false
+                },
+                "default": false
+              },
+              "max_quoted_fallback_images": {
+                "description": "引用图片回退解析上限",
+                "type": "int",
+                "hint": "引用/转发消息回退解析图片时的最大注入数量，超出会截断。",
+                "collapsed": true,
+                "default": 20
+              },
+              "quoted_message_parser": {
+                "type": "object",
+                "description": "引用与转发解析",
+                "items": {
+                  "max_component_chain_depth": {
+                    "description": "引用解析组件链深度",
+                    "type": "int",
+                    "hint": "解析 Reply 组件链时允许的最大递归深度。",
+                    "collapsed": true,
+                    "default": 4
+                  },
+                  "max_forward_node_depth": {
+                    "description": "引用解析转发节点深度",
+                    "type": "int",
+                    "hint": "解析合并转发节点时允许的最大递归深度。",
+                    "collapsed": true,
+                    "default": 6
+                  },
+                  "max_forward_fetch": {
+                    "description": "引用解析转发拉取上限",
+                    "type": "int",
+                    "hint": "递归拉取 get_forward_msg 的最大次数。",
+                    "collapsed": true,
+                    "default": 32
+                  },
+                  "warn_on_action_failure": {
+                    "description": "引用解析 action 失败告警",
+                    "type": "bool",
+                    "hint": "开启后，get_msg/get_forward_msg 全部尝试失败时输出 warning 日志。",
+                    "collapsed": true,
+                    "default": false
+                  }
+                }
+              },
+              "file_extract": {
+                "type": "object",
+                "description": "文件解析",
+                "items": {
+                  "enable": {
+                    "description": "启用文件解析",
+                    "type": "bool",
+                    "default": false
+                  },
+                  "provider": {
+                    "description": "文件解析提供商",
+                    "type": "string",
+                    "options": [
+                      "moonshotai"
+                    ],
+                    "condition": {
+                      "enable": true
+                    },
+                    "default": "moonshotai"
+                  },
+                  "moonshotai_api_key": {
+                    "description": "Moonshot AI API Key",
+                    "type": "string",
+                    "secret": true,
+                    "condition": {
+                      "enable": true,
+                      "provider": "moonshotai"
+                    },
+                    "default": ""
+                  }
+                }
+              },
+              "proactive_capability": {
+                "type": "object",
+                "description": "主动任务能力",
+                "items": {
+                  "add_cron_tools": {
+                    "description": "启用",
+                    "type": "bool",
+                    "hint": "启用后，将会传递给 Agent 相关工具来实现主动型 Agent。你可以告诉 AstrBot 未来某个时间要做的事情，它将被定时触发然后执行任务。",
+                    "default": true
+                  }
+                }
+              },
+              "image_compress_options": {
+                "type": "object",
+                "description": "输入图片压缩",
+                "items": {
+                  "max_size": {
+                    "description": "输入图片最大边长",
+                    "type": "int",
+                    "hint": "发送给模型的图片最长边（像素），系统会在必要时进一步压缩。",
+                    "slider": {
+                      "min": 256,
+                      "max": 4096,
+                      "step": 64
+                    },
+                    "default": 1280
+                  }
+                }
+              }
+            }
+          },
+          "kb_names": {
+            "description": "知识库列表",
+            "type": "list",
+            "items": {
+              "type": "string"
+            },
+            "_special": "select_knowledgebase",
+            "hint": "支持多选",
+            "default": []
+          },
+          "kb_fusion_top_k": {
+            "description": "融合检索结果数",
+            "type": "int",
+            "hint": "多个知识库检索结果融合后的返回结果数量",
+            "default": 20
+          },
+          "kb_final_top_k": {
+            "description": "最终返回结果数",
+            "type": "int",
+            "hint": "从知识库中检索到的结果数量，越大可能获得越多相关信息，但也可能引入噪音。建议根据实际需求调整",
+            "default": 5
+          },
+          "kb_agentic_mode": {
+            "description": "Agentic 知识库检索",
+            "type": "bool",
+            "hint": "启用后，知识库检索将作为 LLM Tool，由模型自主决定何时调用知识库进行查询。需要模型支持函数调用能力。",
+            "default": false
+          }
+        }
+      },
+      "context_messages": {
+        "type": "int",
+        "description": "近期上下文条数",
+        "default": 40,
+        "slider": {"min": 1, "max": 100, "step": 1},
+        "hint": "每个会话保留最近 1～100 条群友消息和机器人回复；每条原文及图片描述各最多 2000 字符，图片 URL/base64 不受此文字截断限制。不按时间过期，重启保留；超出条数上限时移除最旧记录。"
+      }
+    }
+  },
   "share_parse": {
     "type": "object",
     "description": "卡片解析",

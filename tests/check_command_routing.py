@@ -82,6 +82,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
             astrbot_config=self.core_config,
             astrbot_config_id="test",
             db_helper=None,
+            plugin_manager=SimpleNamespace(context=self.plugin.context),
         )
         await self.stage.initialize(pipeline_context)
         self.listener = next(
@@ -127,11 +128,7 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
                 "get_handlers_by_event_type",
                 return_value=handlers,
             ),
-            patch.object(
-                waking.SessionPluginManager,
-                "filter_handlers_by_session",
-                AsyncMock(side_effect=lambda e, hs: hs),
-            ),
+            patch.object(self.stage._umo_auto_name_recorder, "schedule"),
         ):
             await self.stage.process(event)
 

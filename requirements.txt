@@ -8,3 +8,5 @@ playwright>=1.40.0
 # psutil is provided by AstrBot and identifies process restarts.
 
 lunar-python>=1.3.0
+# Async rolling group context storage.
+redis>=5.0.0
