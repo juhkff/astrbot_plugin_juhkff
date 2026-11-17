@@ -283,7 +283,145 @@ class GroupChatTests(IsolatedAsyncioTestCase):
             self.assertEqual(admitted, [True, False, True])
             self.assertEqual(rng.call_count, 3)
 
+    async def test_group_probabilities_override_default_and_use_first_match(self):
+        origin = self.event().unified_msg_origin
+        cases = [
+            (
+                "group-id",
+                "group-a",
+                [{"groups": ["group-a"], "probability": 0.8}],
+                0.2,
+                0.5,
+                True,
+            ),
+            (
+                "origin",
+                "group-a",
+                [{"groups": [origin], "probability": 0.8}],
+                0.2,
+                0.5,
+                True,
+            ),
+            (
+                "numeric-id",
+                "123",
+                [{"groups": [123], "probability": 0.8}],
+                0.2,
+                0.5,
+                True,
+            ),
+            (
+                "multiple-groups",
+                "group-b",
+                [{"groups": ["group-a", "group-b"], "probability": 0.8}],
+                0.2,
+                0.5,
+                True,
+            ),
+            (
+                "unmatched-admit",
+                "group-b",
+                [{"groups": ["group-a"], "probability": 0}],
+                0.2,
+                0.1,
+                True,
+            ),
+            (
+                "unmatched-reject",
+                "group-b",
+                [{"groups": ["group-a"], "probability": 1}],
+                0.2,
+                0.5,
+                False,
+            ),
+            (
+                "empty-groups",
+                "group-a",
+                [{"groups": [], "probability": 1}],
+                0.2,
+                0.5,
+                False,
+            ),
+            (
+                "first-match",
+                "group-a",
+                [
+                    {"groups": ["group-a"], "probability": 0},
+                    {"groups": [origin], "probability": 1},
+                ],
+                1,
+                0,
+                False,
+            ),
+            (
+                "zero",
+                "group-a",
+                [{"groups": ["group-a"], "probability": 0}],
+                1,
+                0,
+                False,
+            ),
+            (
+                "one",
+                "group-a",
+                [{"groups": ["group-a"], "probability": 1}],
+                0,
+                0.99999,
+                True,
+            ),
+            (
+                "threshold",
+                "group-a",
+                [{"groups": ["group-a"], "probability": 0.5}],
+                1,
+                0.5,
+                False,
+            ),
+            (
+                "lower-bound",
+                "group-a",
+                [{"groups": ["group-a"], "probability": -1}],
+                1,
+                0,
+                False,
+            ),
+            (
+                "upper-bound",
+                "group-a",
+                [{"groups": ["group-a"], "probability": 2}],
+                0,
+                0.99999,
+                True,
+            ),
+        ]
+        for name, group, rules, default, draw, expected in cases:
+            with self.subTest(name=name):
+                self.module.cfg.update(probability=default, group_rates=rules)
+                event = self.event(group=group)
+                await self.module.prepare(event)
+                with patch.object(
+                    group_chat.random, "random", return_value=draw
+                ) as rng:
+                    await self.module.admit(event)
+                self.assertEqual(event.is_at_or_wake_command, expected)
+                rng.assert_called_once()
+                self.assertEqual(self.module.cfg["probability"], default)
+
+    async def test_group_probability_rule_does_not_expand_enabled_groups(self):
+        self.module.cfg.update(
+            groups=["group-a"],
+            group_rates=[{"groups": ["group-b"], "probability": 1}],
+        )
+        event = self.event(group="group-b")
+        await self.module.prepare(event)
+        with patch.object(group_chat.random, "random") as rng:
+            await self.module.admit(event)
+        rng.assert_not_called()
+        self.assertFalse(event.is_at_or_wake_command)
+        self.assertFalse(event.get_extra("juhkff_group_owned"))
+
     async def test_bare_mention_bypasses_zero_probability(self):
+        self.module.cfg["group_rates"] = [{"groups": ["group-a"], "probability": 0}]
         prior = self.event()
         await self.module.prepare(prior)
         mention = self.event(

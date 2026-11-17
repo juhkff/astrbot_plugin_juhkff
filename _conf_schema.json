@@ -65,7 +65,34 @@
         "description": "普通消息接话概率",
         "default": 0.2,
         "slider": {"min": 0, "max": 1, "step": 0.01},
-        "hint": "每条普通消息独立抽取，无接话冷却；0 禁止随机接话，@ 等核心唤醒仍由本模块安排回复。文字模式图片转述不受此概率限制。"
+        "hint": "未设置分群概率时使用。每条普通消息独立抽取，无接话冷却；0 禁止随机接话，不影响 @ 等唤醒回复及文字模式图片转述。"
+      },
+      "group_rates": {
+        "description": "分群接话概率",
+        "type": "template_list",
+        "default": [],
+        "hint": "为指定群单独设置接话概率；未设置的群用默认值，同群多条规则只用第一条。不会扩大生效群范围。",
+        "templates": {
+          "rule": {
+            "name": "分群设置",
+            "items": {
+              "groups": {
+                "description": "适用群",
+                "type": "list",
+                "default": [],
+                "_special": "umo",
+                "hint": "选择群聊，可多选，也可填写群号或完整会话 ID；留空则此规则不生效。"
+              },
+              "probability": {
+                "description": "接话概率",
+                "type": "float",
+                "default": 0.2,
+                "slider": {"min": 0, "max": 1, "step": 0.01},
+                "hint": "0.2 表示 20%；0 关闭随机接话，不影响 @ 等唤醒回复及文字模式图片转述。"
+              }
+            }
+          }
+        }
       },
       "image_mode": {
         "type": "string",

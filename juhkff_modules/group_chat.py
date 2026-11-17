@@ -461,7 +461,16 @@ class GroupChatModule(BaseModule):
             return None
         addressed = event.is_at_or_wake_command
         if not addressed:
-            probability = max(0, min(1, float(self.cfg.get("probability", 0.2))))
+            probability = self.cfg.get("probability", 0.2)
+            for rule in self.cfg.get("group_rates") or []:
+                groups = [str(group) for group in (rule.get("groups") or [])]
+                if (
+                    str(event.get_group_id()) in groups
+                    or event.unified_msg_origin in groups
+                ):
+                    probability = rule.get("probability", probability)
+                    break
+            probability = max(0, min(1, float(probability)))
             if random.random() >= probability:
                 return None
             if not event.message_str.strip() and not event.get_messages():
