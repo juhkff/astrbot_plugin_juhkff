@@ -158,7 +158,7 @@ class GroupChatRequestLogger:
             body: Decoded outgoing JSON body, used only for display.
 
         Returns:
-            Multiline model parameters, messages and tool definitions.
+            Multiline model parameters, messages and a compact list of tool names.
         """
         if not isinstance(body, dict):
             return cls._format_content(body)
@@ -225,9 +225,27 @@ class GroupChatRequestLogger:
                 )
             lines.append(f"\n{role}：{text}")
         if body.get("tools"):
-            lines.append(
-                "\ntools: " + json.dumps(body["tools"], ensure_ascii=False, indent=2)
-            )
+            names = []
+            for tool in body["tools"]:
+                if not isinstance(tool, dict):
+                    names.append(str(tool))
+                    continue
+                declarations = tool.get(
+                    "functionDeclarations", tool.get("function_declarations")
+                )
+                if isinstance(declarations, list):
+                    names.extend(
+                        str(function.get("name") or "unknown")
+                        for function in declarations
+                        if isinstance(function, dict)
+                    )
+                else:
+                    function = tool.get("function", tool)
+                    name = function.get("name") if isinstance(function, dict) else None
+                    names.append(
+                        str(name or tool.get("type") or next(iter(tool), "unknown"))
+                    )
+            lines.append("\ntools: " + ", ".join(names))
         return "\n".join(lines)
 
     def close(self):

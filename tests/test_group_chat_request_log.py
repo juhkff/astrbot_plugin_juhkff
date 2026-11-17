@@ -186,7 +186,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
             self.assert_metadata(entry)
             self.assertIn("\nmodel: offline-model\n", entry)
             self.assertIn("\nparameters: ", entry)
-            self.assertIn("\ntools: [\n", entry)
+            self.assertIn("\ntools: lookup", entry)
             self.assertIn("\n\nsystem：系统要求\n保留换行", entry)
             self.assertIn("\nuser：原始文本\nsecond line", entry)
             self.assertIn(
@@ -287,9 +287,55 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
         self.assertNotIn("extra_body", wire_body)
         self.assertFalse(wire_body["stream"])
         self.assertEqual(wire_body["tools"][0]["function"]["name"], "lookup")
-        self.assertIn("\ntools: [\n", entries[0])
+        self.assertIn("\ntools: lookup", entries[0])
         self.assertIn("lookup", entries[0])
         self.assertNotIn("sdk-key-secret", self.rendered(self.info.call_args))
+
+    async def test_tool_definitions_log_only_names_across_provider_formats(self):
+        definition = {
+            "description": "verbose tool description must stay off the log",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}},
+        }
+        cases = [
+            (
+                [
+                    {"type": "function", "function": {"name": "fetch", **definition}},
+                    {"type": "function", "function": {"name": "search", **definition}},
+                ],
+                "fetch, search",
+            ),
+            ([{"type": "function", "name": "fetch", **definition}], "fetch"),
+            ([{"name": "fetch", "input_schema": definition}], "fetch"),
+            (
+                [
+                    {
+                        "functionDeclarations": [
+                            {"name": "fetch", **definition},
+                            {"name": "search", **definition},
+                        ]
+                    }
+                ],
+                "fetch, search",
+            ),
+            ([{"function_declarations": [{"name": "fetch", **definition}]}], "fetch"),
+            ([{"type": "web_search_preview"}], "web_search_preview"),
+            ([{"googleSearch": {}}], "googleSearch"),
+        ]
+        self.request_logger.bind(self.event)
+        for tools, expected in cases:
+            with self.subTest(expected=expected, tools=tools):
+                body = {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": tools,
+                }
+                await self.post(body)
+                entry = self.entries()[-1]
+                self.assertEqual(entry.split("\ntools: ", 1)[1], expected)
+                self.assertNotIn("verbose tool description", entry)
+                self.assertNotIn('"properties"', entry)
+                self.assertNotIn('"input_schema"', entry)
+                self.assertEqual(json.loads(self.received[-1].content), body)
+        self.warning.assert_not_called()
 
     async def test_multiple_images_omit_only_base64_in_logs(self):
         png = "QUJD" * 6000 + "=="
@@ -481,7 +527,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
         self.assert_role_order(
             entry, ("system", "user", "assistant", "assistant", "tool")
         )
-        self.assertIn("\ntools: [\n", entry)
+        self.assertIn("\ntools: lookup", entry)
         self.assertRegex(entry, r'"parallel_tool_calls"\s*:\s*false')
         self.assertRegex(entry, r'"effort"\s*:\s*"low"')
         self.assertNotIn('"instructions":', entry)
