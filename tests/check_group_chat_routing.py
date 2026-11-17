@@ -16,6 +16,7 @@ from astrbot.core.pipeline.process_stage.stage import ProcessStage
 from astrbot.core.pipeline.waking_check import stage as waking
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from data.plugins.astrbot_plugin_juhkff import main as entry
+from juhkff_modules.module_logging import module_log_scope
 
 
 class GroupChatRoutingTests(fixtures.GroupChatTests):
@@ -31,6 +32,8 @@ class GroupChatRoutingTests(fixtures.GroupChatTests):
             async for result in entry.JuhkffPlugin._admit_group_chat(
                 self.plugin, event
             ):
+                # No context token may stay open while the framework owns a yield.
+                self.assertIsNone(module_log_scope.get())
                 yield result
 
         async def unrelated(event):

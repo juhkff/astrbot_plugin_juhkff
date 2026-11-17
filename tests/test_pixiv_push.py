@@ -151,7 +151,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         self.module._download = AsyncMock(return_value=self.image)
         self.module._get_bot_id = AsyncMock(return_value="100")
         self.plugin.context.send_message.side_effect = [True, False]
-        with patch.object(pixiv.logger, "exception"):
+        with patch.object(self.module.log, "exception"):
             self.assertFalse(await self.module._check_artist("7"))
         first_calls = self.plugin.context.send_message.await_args_list
         self.assertEqual(

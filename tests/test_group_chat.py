@@ -461,7 +461,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
                 "start",
                 AsyncMock(side_effect=ConnectionError("offline Redis")),
             ) as start,
-            patch.object(group_chat.logger, "exception") as log,
+            patch.object(self.module.log, "exception") as log,
         ):
             await self.module.prepare(event)
             second = self.event("fresh", addressed=True)

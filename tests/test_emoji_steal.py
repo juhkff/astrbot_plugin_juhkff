@@ -57,7 +57,7 @@ class EmojiStealTests(unittest.IsolatedAsyncioTestCase):
         self.paths = patch.object(emoji_steal, "data_dir", return_value=self.base)
         self.paths.start()
         self.addCleanup(self.paths.stop)
-        self.logs = patch.object(emoji_steal, "logger")
+        self.logs = patch.object(self.module, "log")
         self.logs.start()
         self.addCleanup(self.logs.stop)
         self.module.debug = Mock()

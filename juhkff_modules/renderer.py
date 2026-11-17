@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from astrbot.api import logger
+from .module_logging import ModuleLogger
+
+logger = ModuleLogger()
 
 # Keep existing callers' viewport and pixel density unless explicitly overridden.
 VIEWPORT: dict[str, int] = {"width": 608, "height": 1100}

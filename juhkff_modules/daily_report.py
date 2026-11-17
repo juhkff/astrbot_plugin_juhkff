@@ -7,7 +7,6 @@ import random
 from datetime import date, datetime
 from pathlib import Path
 
-from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.platform import MessageType
 
@@ -68,7 +67,7 @@ class DailyReportModule(BaseModule):
                 "report-push",
                 tz_name=self.tz_name,
             )
-        logger.info(
+        self.log.info(
             "[juhkff] Daily report ready: style=%s, push=%s, pre_handle=%s",
             self.cfg.get("style", "random"),
             bool(self.cfg.get("push", True)),
@@ -133,7 +132,7 @@ class DailyReportModule(BaseModule):
         """
         selected = style or _style_id(str(self.cfg.get("style", "random")))
         if selected is None:
-            logger.warning("[juhkff] Invalid report style; using random selection")
+            self.log.warning("[juhkff] Invalid report style; using random selection")
         if selected in (None, "random"):
             selected = random.choice(TEMPLATES).id
         template = get_template(selected)
@@ -163,7 +162,7 @@ class DailyReportModule(BaseModule):
                 temporary = path.with_suffix(".tmp")
                 temporary.write_bytes(png)
                 temporary.replace(path)
-                logger.info(
+                self.log.info(
                     "[juhkff] Report rendered: day=%s, style=%s, counts=%s",
                     day.isoformat(),
                     template.id,
@@ -171,7 +170,7 @@ class DailyReportModule(BaseModule):
                 )
                 return path
             except Exception:
-                logger.exception("[juhkff] Daily report generation failed")
+                self.log.exception("[juhkff] Daily report generation failed")
                 return None
 
     async def _collect(self, day: date, folder: Path) -> dict[str, list[NewsItem]]:
@@ -245,12 +244,12 @@ class DailyReportModule(BaseModule):
                     if await self._generate(style) is None:
                         failed.append(style)
                 if not failed:
-                    logger.info("[juhkff] Daily report pre-generation completed")
+                    self.log.info("[juhkff] Daily report pre-generation completed")
                     return
                 pending = failed
                 if attempt < 5:
                     await asyncio.sleep(delay)
-            logger.warning("[juhkff] Report pre-generation failed after five retries")
+            self.log.warning("[juhkff] Report pre-generation failed after five retries")
         finally:
             self._refresh_task = None
 
@@ -264,11 +263,11 @@ class DailyReportModule(BaseModule):
             if g is not None and str(g).strip()
         ]
         if not groups:
-            logger.info("[juhkff] Report delivery skipped: no groups configured")
+            self.log.info("[juhkff] Report delivery skipped: no groups configured")
             return
         path = await self._generate()
         if path is None:
-            logger.error("[juhkff] Report delivery skipped: image generation failed")
+            self.log.error("[juhkff] Report delivery skipped: image generation failed")
             return
         for target in groups:
             try:
@@ -277,4 +276,4 @@ class DailyReportModule(BaseModule):
                     umo, MessageChain().file_image(str(path))
                 )
             except Exception:
-                logger.exception("[juhkff] Report delivery failed: %s", target)
+                self.log.exception("[juhkff] Report delivery failed: %s", target)

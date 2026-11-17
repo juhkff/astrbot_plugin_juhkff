@@ -43,7 +43,7 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
         self.clock = patch.object(help_gen.time, "time", return_value=self.now)
         self.clock.start()
         self.addCleanup(self.clock.stop)
-        self.logs = patch.object(help_gen, "logger")
+        self.logs = patch.object(self.module, "log")
         self.logs.start()
         self.addCleanup(self.logs.stop)
 

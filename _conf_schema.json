@@ -2,20 +2,13 @@
   "global": {
     "type": "object",
     "description": "全局设置",
-    "hint": "所有功能共用的开关、日志、代理和时区。",
+    "hint": "所有功能共用的开关、代理和时区。",
     "items": {
       "enabled": {
         "description": "总开关",
         "type": "bool",
         "default": true,
         "hint": "关闭后停用本插件的所有功能。"
-      },
-      "debug": {
-        "description": "详细日志",
-        "type": "bool",
-        "default": true,
-        "hint": "记录运行细节，方便排查问题。",
-        "obvious_hint": true
       },
       "proxy": {
         "description": "网络代理",
@@ -36,6 +29,12 @@
     "description": "主动群聊",
     "hint": "可禁用官方 astrbot 系统插件，仅由本模块负责群聊触发和 Redis 上下文；模型、人格与工具复用框架核心。历史不按时间过期，重启保留，不修改官方配置。",
     "items": {
+      "print_log": {
+        "description": "打印日志",
+        "type": "bool",
+        "default": true,
+        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+      },
       "enable": {
         "type": "bool",
         "description": "启用",
@@ -617,6 +616,12 @@
     "description": "卡片解析",
     "hint": "自动提取分享卡片的标题、简介和链接，可附带封面；不处理普通文字链接。",
     "items": {
+      "print_log": {
+        "description": "打印日志",
+        "type": "bool",
+        "default": true,
+        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+      },
       "enable": {
         "description": "启用",
         "type": "bool",
@@ -668,6 +673,12 @@
     "description": "偷表情",
     "hint": "同群相同图片在指定时长内出现两次后收藏，并按概率随机发送表情。",
     "items": {
+      "print_log": {
+        "description": "打印日志",
+        "type": "bool",
+        "default": true,
+        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+      },
       "enable": {
         "description": "启用",
         "type": "bool",
@@ -775,6 +786,12 @@
     "description": "日报",
     "hint": "发送 #日报 获取今日日报，包含时政、国内社会、游戏、数码四类新闻，每类最多 12 条。",
     "items": {
+      "print_log": {
+        "description": "打印日志",
+        "type": "bool",
+        "default": true,
+        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+      },
       "enable": {
         "description": "启用",
         "type": "bool",
@@ -883,6 +900,12 @@
     "description": "Pixiv 订阅",
     "hint": "订阅画师新插画，将新作和全部图片合并转发。首次订阅或重启 AstrBot 后，首次检查只记录最新作品，不补推旧作。",
     "items": {
+      "print_log": {
+        "description": "打印日志",
+        "type": "bool",
+        "default": true,
+        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+      },
       "enable": {
         "description": "启用",
         "type": "bool",
@@ -954,6 +977,12 @@
     "description": "帮助图",
     "hint": "发送帮助指令，查看本插件已启用功能的用法；默认指令为 #帮助。",
     "items": {
+      "print_log": {
+        "description": "打印日志",
+        "type": "bool",
+        "default": true,
+        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+      },
       "enable": {
         "description": "启用",
         "type": "bool",

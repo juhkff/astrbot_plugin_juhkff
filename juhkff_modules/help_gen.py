@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 
 from .common import BaseModule, data_dir, message_text
@@ -289,7 +288,7 @@ class HelpGenModule(BaseModule):
                 except OSError:
                     continue
         except (OSError, RuntimeError):
-            logger.warning("[juhkff] Help image cleanup failed", exc_info=True)
+            self.log.warning("[juhkff] Help image cleanup failed", exc_info=True)
 
     async def _reply(self, event: AstrMessageEvent):
         """Render grouped help or return explicitly selected text output.
@@ -325,7 +324,7 @@ class HelpGenModule(BaseModule):
             _HTML, data, scale=2, viewport={"width": 880, "height": 900}
         )
         if not png:
-            logger.error("[juhkff] Help image rendering failed")
+            self.log.error("[juhkff] Help image rendering failed")
             return event.plain_result(
                 "帮助图生成失败，详细原因看 AstrBot 日志（[juhkff] 开头）"
             )

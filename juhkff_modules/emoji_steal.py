@@ -16,7 +16,6 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image
 
@@ -75,7 +74,7 @@ class EmojiStealModule(BaseModule):
         self._index = load_json(self._index_path, {}) or {}
         self._prints = load_json(self._prints_path, {}) or {}
         await asyncio.to_thread(self._prune)
-        logger.info(
+        self.log.info(
             f"[juhkff] Emoji collection ready: {len(self._index)} groups, "
             f"{sum(len(v) for v in self._index.values())} images"
         )
@@ -163,7 +162,7 @@ class EmojiStealModule(BaseModule):
         try:
             await self._collect(event, group_key, umo)
         except Exception:
-            logger.exception("[juhkff] Emoji collection failed")
+            self.log.exception("[juhkff] Emoji collection failed")
 
         # One probability check governs both stolen and local images.
         if self._rng.random() >= emoji_rate:
@@ -179,7 +178,7 @@ class EmojiStealModule(BaseModule):
                 return None
             path, source = self._rng.choice(local), "local gallery"
         await asyncio.sleep(self._rng.uniform(0.0, 1.5))
-        logger.info(f"[juhkff] Sending image from {source}: {path}")
+        self.log.info(f"[juhkff] Sending image from {source}: {path}")
         return MessageChain().file_image(str(path))
 
     @staticmethod
@@ -271,7 +270,7 @@ class EmojiStealModule(BaseModule):
             try:
                 base.mkdir(parents=True, exist_ok=True)
             except OSError:
-                logger.warning(
+                self.log.warning(
                     f"[juhkff] Cannot create local gallery directory: {base}"
                 )
         self._gallery = files
@@ -353,7 +352,7 @@ class EmojiStealModule(BaseModule):
                         prints = self._prints.get(group_key) or {}
                         if prints.pop(digest, None) is not None:
                             changed = True
-                            logger.info(
+                            self.log.info(
                                 f"[juhkff] Image rejected as emoji; cleared {digest[:8]}"
                             )
                     continue
@@ -391,7 +390,7 @@ class EmojiStealModule(BaseModule):
                 try:
                     await asyncio.to_thread(target.write_bytes, data)
                 except OSError as exc:
-                    logger.warning(f"[juhkff] Saving emoji image failed: {exc}")
+                    self.log.warning(f"[juhkff] Saving emoji image failed: {exc}")
                     continue
                 group_index[digest] = {
                     "file": target.name,
@@ -400,7 +399,7 @@ class EmojiStealModule(BaseModule):
                 }
                 prints.pop(digest, None)
                 changed = True
-                logger.info(f"[juhkff] Collected emoji {target} ({size} bytes)")
+                self.log.info(f"[juhkff] Collected emoji {target} ({size} bytes)")
                 self._trim_group(group_key)
 
         if changed:

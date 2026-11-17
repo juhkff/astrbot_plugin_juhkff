@@ -23,7 +23,7 @@ from typing import TypedDict
 import psutil
 from aiohttp import ClientConnectionError
 
-from astrbot.api import AstrBotConfig, logger
+from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.platform import MessageType
@@ -241,7 +241,7 @@ class PixivPushModule(BaseModule):
         await self.scheduler.every_minutes(
             1, self.check, "pixiv-check", tz_name=self.tz_name
         )
-        logger.info("[juhkff] Pixiv artist subscriptions ready")
+        self.log.info("[juhkff] Pixiv artist subscriptions ready")
 
     async def stop(self) -> None:
         """Cancel and await startup work and any in-flight scheduled checks."""
@@ -301,7 +301,7 @@ class PixivPushModule(BaseModule):
             return event.plain_result("Pixiv 订阅已停用。")
         config = self.plugin.config
         if not isinstance(config, AstrBotConfig):
-            logger.error(
+            self.log.error(
                 "[juhkff] Pixiv subscriptions require AstrBotConfig persistence"
             )
             return event.plain_result("订阅保存失败，请检查配置。")
@@ -334,7 +334,7 @@ class PixivPushModule(BaseModule):
             config.save_config()
         except Exception:
             config[self.key] = previous
-            logger.exception("[juhkff] Failed to save Pixiv subscriptions")
+            self.log.exception("[juhkff] Failed to save Pixiv subscriptions")
             return event.plain_result("订阅保存失败，请稍后重试。")
 
         if not subscribe:
@@ -348,7 +348,7 @@ class PixivPushModule(BaseModule):
             try:
                 self._persist_state()
             except Exception:
-                logger.exception(
+                self.log.exception(
                     "[juhkff] Failed to save Pixiv cancellation checkpoint"
                 )
             return event.plain_result(f"已取消本群对画师 {user_id} 的订阅。")
@@ -413,7 +413,7 @@ class PixivPushModule(BaseModule):
                     try:
                         success = await self._check_artist(user_id)
                     except Exception:
-                        logger.exception(
+                        self.log.exception(
                             "[juhkff] Pixiv artist check failed: %s", user_id
                         )
                     if not self._groups(user_id):
@@ -428,7 +428,7 @@ class PixivPushModule(BaseModule):
                         self._failures[user_id] = failures
                         delay = retry_base * failures
                         self._due[user_id] = time.monotonic() + delay
-                        logger.warning(
+                        self.log.warning(
                             "[juhkff] Pixiv artist %s failed %s times; retry in %s minutes",
                             user_id,
                             failures,
@@ -516,7 +516,7 @@ class PixivPushModule(BaseModule):
                     state["delivered"][group] = latest
                     self._persist_state()
             except Exception:
-                logger.exception(
+                self.log.exception(
                     "[juhkff] Pixiv merged-forward delivery failed: %s", group
                 )
         groups = self._groups(user_id)
@@ -766,7 +766,7 @@ class PixivPushModule(BaseModule):
                         temporary.replace(target)
                         return target
                     except Exception as exc:
-                        logger.warning(
+                        self.log.warning(
                             "[juhkff] Pixiv page attempt failed for %s p%s: %s",
                             item["id"],
                             index,
@@ -776,11 +776,11 @@ class PixivPushModule(BaseModule):
                             exc, (ClientConnectionError, ConnectionResetError)
                         ) or str(exc).startswith("HTTP 429 "):
                             return None
-            logger.warning(
+            self.log.warning(
                 "[juhkff] No valid Pixiv page downloaded: %s p%s", item["id"], index
             )
         except (OSError, ValueError, TypeError, OverflowError):
-            logger.exception(
+            self.log.exception(
                 "[juhkff] Failed to cache Pixiv page: %s p%s", item["id"], index
             )
         return None

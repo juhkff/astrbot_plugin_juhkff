@@ -19,9 +19,10 @@ import aiohttp
 from bs4 import BeautifulSoup
 from PIL import Image, ImageStat, UnidentifiedImageError
 
-from astrbot.api import logger
-
 from .http_utils import public_request
+from .module_logging import ModuleLogger
+
+logger = ModuleLogger()
 
 _CST = timezone(timedelta(hours=8))
 _MAX_ITEMS = 12

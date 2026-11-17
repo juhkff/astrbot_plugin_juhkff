@@ -40,11 +40,12 @@ from juhkff_modules.daily_report import DailyReportModule  # noqa: E402
 from juhkff_modules.emoji_steal import EmojiStealModule  # noqa: E402
 from juhkff_modules.group_chat import GroupChatModule  # noqa: E402
 from juhkff_modules.help_gen import HelpGenModule  # noqa: E402
+from juhkff_modules.module_logging import ModuleLogger  # noqa: E402
 from juhkff_modules.pixiv_push import PixivPushModule  # noqa: E402
 from juhkff_modules.renderer import renderer as html_renderer  # noqa: E402
 from juhkff_modules.share_parse import ShareParseModule  # noqa: E402
 
-from astrbot.api import AstrBotConfig, logger  # noqa: E402
+from astrbot.api import AstrBotConfig  # noqa: E402
 from astrbot.api.event import (  # noqa: E402
     AstrMessageEvent,
     MessageEventResult,
@@ -58,6 +59,7 @@ from astrbot.core.pipeline.process_stage.method.agent_request import (  # noqa: 
 
 # 版本号：开发期间固定为初代 0.1.0，不随功能变化调整。
 VERSION = "0.1.0"
+logger = ModuleLogger()
 
 
 @register(
@@ -124,41 +126,46 @@ class JuhkffPlugin(Star):
             return
         self._started = True
 
-        started, skipped, failed = [], [], []
         for mod in self.modules.values():
             if not mod.enabled:
-                skipped.append(mod.key)
                 continue
-            try:
-                await mod.start()
-                started.append(mod.key)
-            except Exception:
-                failed.append(mod.key)
-                logger.exception(f"[juhkff] 模块 {mod.key} 启动失败")
-
-        logger.info(
-            f"[juhkff] v{VERSION} 已加载 | 启动: {started or '无'} | "
-            f"停用: {skipped or '无'} | 失败: {failed or '无'}"
-        )
+            with ModuleLogger(mod).scope():
+                try:
+                    await mod.start()
+                    logger.info("[juhkff] Module %s started", mod.key)
+                except Exception:
+                    logger.exception("[juhkff] Module %s failed to start", mod.key)
 
     async def terminate(self) -> None:
         """Stop modules and release jobs and browser resources on every exit path."""
         try:
             for mod in self.modules.values():
-                try:
-                    await mod.stop()
-                except Exception:
-                    logger.exception("[juhkff] Module %s failed to stop", mod.key)
+                with ModuleLogger(mod).scope():
+                    try:
+                        await mod.stop()
+                        logger.info("[juhkff] Module %s stopped", mod.key)
+                    except Exception:
+                        logger.exception("[juhkff] Module %s failed to stop", mod.key)
         finally:
             try:
                 await self.scheduler.shutdown()
             finally:
                 # Keep the bound renderer reachable after a module-cache reload.
-                try:
-                    await html_renderer.close()
-                except Exception:
-                    logger.exception("[juhkff] Failed to close the local renderer")
-        logger.info("[juhkff] Plugin unloaded")
+                owner = next(
+                    (
+                        mod
+                        for key, mod in self.modules.items()
+                        if key in ("help", "daily_report")
+                        and getattr(mod, "enabled", False)
+                        and getattr(mod, "log_enabled", False)
+                    ),
+                    None,
+                )
+                with ModuleLogger(owner).scope():
+                    try:
+                        await html_renderer.close()
+                    except Exception:
+                        logger.exception("[juhkff] Failed to close the local renderer")
 
     # ------------------------------------------------------------ 消息分发
 
@@ -184,28 +191,31 @@ class JuhkffPlugin(Star):
         for mod in exclusive or enabled:
             if not mod.enabled:
                 continue
-            try:
-                chain = await mod.handle(event)
-            except Exception:
-                logger.exception(
-                    f"[juhkff] Module {mod.key} failed to handle a message"
-                )
-                if exclusive or event.is_stopped():
-                    event.stop_event()
-                    return
-                continue
-            if chain is None:
-                # A consumed command must not fall through to another responder.
-                if exclusive or event.is_stopped():
-                    event.stop_event()
-                    return
-                continue
-            try:
-                await event.send(chain)
-            except Exception:
-                logger.exception(f"[juhkff] Module {mod.key} failed to send a message")
-            event.stop_event()
-            return
+            with ModuleLogger(mod).scope():
+                try:
+                    chain = await mod.handle(event)
+                except Exception:
+                    logger.exception(
+                        f"[juhkff] Module {mod.key} failed to handle a message"
+                    )
+                    if exclusive or event.is_stopped():
+                        event.stop_event()
+                        return
+                    continue
+                if chain is None:
+                    # A consumed command must not fall through to another responder.
+                    if exclusive or event.is_stopped():
+                        event.stop_event()
+                        return
+                    continue
+                try:
+                    await event.send(chain)
+                except Exception:
+                    logger.exception(
+                        f"[juhkff] Module {mod.key} failed to send a message"
+                    )
+                event.stop_event()
+                return
         yield
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=maxsize)
@@ -215,7 +225,9 @@ class JuhkffPlugin(Star):
         Args:
             event: Incoming group event.
         """
-        await self.modules["group_chat"].prepare(event)
+        module = self.modules["group_chat"]
+        with ModuleLogger(module).scope():
+            await module.prepare(event)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=-maxsize)
     async def _admit_group_chat(self, event: AstrMessageEvent):
@@ -225,7 +237,8 @@ class JuhkffPlugin(Star):
             event: Incoming group event.
         """
         module = self.modules["group_chat"]
-        request = await module.admit(event)
+        with ModuleLogger(module).scope():
+            request = await module.admit(event)
         if module.cfg.get("framework") and event.get_extra("juhkff_group_admitted"):
             # Initialize per event so Core's cached presentation options use this snapshot.
             # Suppress the outer default branch even when the model produces no output.
@@ -254,7 +267,9 @@ class JuhkffPlugin(Star):
             event: Current group event.
             request: Official model request.
         """
-        await self.modules["group_chat"].decorate(event, request)
+        module = self.modules["group_chat"]
+        with ModuleLogger(module).scope():
+            await module.decorate(event, request)
 
     @filter.on_llm_response()
     async def _group_chat_response(self, event, response):
@@ -264,7 +279,9 @@ class JuhkffPlugin(Star):
             event: Current group event.
             response: Official model response.
         """
-        await self.modules["group_chat"].capture_response(event, response)
+        module = self.modules["group_chat"]
+        with ModuleLogger(module).scope():
+            await module.capture_response(event, response)
 
     @filter.after_message_sent()
     async def _group_chat_cleanup(self, event):
@@ -273,7 +290,9 @@ class JuhkffPlugin(Star):
         Args:
             event: Sent event.
         """
-        await self.modules["group_chat"].after_sent(event)
+        module = self.modules["group_chat"]
+        with ModuleLogger(module).scope():
+            await module.after_sent(event)
 
     # ------------------------------------------------------------ 指令
 

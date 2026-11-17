@@ -15,12 +15,14 @@ from typing import Any, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
-from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context
 
 from .http_utils import public_request
+from .module_logging import ModuleLogger, module_log_scope
+
+logger = ModuleLogger()
 
 # Reuse AstrBot's path and temporary-image helpers. Remote requests use the
 # shared bounded public HTTP client instead of an unrestricted core downloader.
@@ -79,7 +81,7 @@ def load_json(path: Path | str, default: Any = None) -> Any:
     except FileNotFoundError:
         return default
     except Exception as exc:
-        logger.warning(f"[juhkff] 读取 {path} 失败: {exc}")
+        logger.warning(f"[juhkff] Reading {path} failed: {exc}")
         return default
 
 
@@ -192,18 +194,23 @@ class Scheduler:
     def __init__(self, context: Context, name: str = PLUGIN_NAME) -> None:
         self.context = context
         self.name = name
-        self._jobs: list[str] = []
+        self._jobs: dict[str, BaseModule | None] = {}
 
     def _wrap(
         self, fn: Callable[[], Awaitable[Any]], label: str
     ) -> Callable[[], Awaitable[None]]:
+        owner = module_log_scope.get()
+
         async def runner() -> None:
+            token = module_log_scope.set(owner)
             try:
                 await fn()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception(f"[juhkff] 定时任务 {label} 执行失败")
+                logger.exception(f"[juhkff] Scheduled task {label} failed")
+            finally:
+                module_log_scope.reset(token)
 
         return runner
 
@@ -224,9 +231,11 @@ class Scheduler:
                 persistent=False,
             )
         except Exception:
-            logger.exception(f"[juhkff] 注册定时任务 {label} 失败（{expression}）")
+            logger.exception(
+                f"[juhkff] Registering scheduled task {label} failed ({expression})"
+            )
             return None
-        self._jobs.append(job.job_id)
+        self._jobs[job.job_id] = module_log_scope.get()
         return job.job_id
 
     async def daily(
@@ -273,11 +282,14 @@ class Scheduler:
         return await self._add(expression, fn, label, tz_name)
 
     async def shutdown(self) -> None:
-        for job_id in list(self._jobs):
+        for job_id, owner in list(self._jobs.items()):
+            token = module_log_scope.set(owner)
             try:
                 await self.context.cron_manager.delete_job(job_id)
             except Exception:
-                logger.warning(f"[juhkff] 删除定时任务 {job_id} 失败")
+                logger.warning(f"[juhkff] Deleting scheduled task {job_id} failed")
+            finally:
+                module_log_scope.reset(token)
         self._jobs.clear()
 
 
@@ -299,6 +311,7 @@ class BaseModule(ABC):
 
     def __init__(self, plugin: PluginLike) -> None:
         self.plugin = plugin
+        self.log = ModuleLogger(self)
 
     # -- 配置
 
@@ -317,21 +330,18 @@ class BaseModule(ABC):
         return self.plugin.scheduler
 
     @property
-    def debug_enabled(self) -> bool:
-        """配置页「全局设置 → 调试日志」是否打开（`global.debug`）。"""
-        return bool((self.plugin.config.get("global") or {}).get("debug", True))
+    def log_enabled(self) -> bool:
+        """Read this module's logging switch dynamically."""
+        return bool(self.cfg.get("print_log", True))
 
     def debug(self, msg: str, **kwargs: Any) -> None:
-        """Log details at INFO by default, or DEBUG when explicitly disabled.
+        """Log existing diagnostic messages at INFO through the module switch.
 
         Args:
             msg: Detail message for the plugin log.
             **kwargs: Additional arguments forwarded to the logger.
         """
-        if self.debug_enabled:
-            logger.info(msg, **kwargs)
-        else:
-            logger.debug(msg, **kwargs)
+        self.log.info(msg, **kwargs)
 
     @property
     def proxy(self) -> str:
@@ -534,7 +544,9 @@ def save_temp_image(data: bytes, suffix: str = ".png") -> str:
         try:
             return _builtin_save_temp_img(data)
         except Exception as exc:
-            logger.debug(f"[juhkff] 内置 save_temp_img 失败，回退临时文件: {exc}")
+            logger.debug(
+                f"[juhkff] Built-in save_temp_img failed; using a temporary file: {exc}"
+            )
     with tempfile.NamedTemporaryFile(
         delete=False,
         suffix=suffix,

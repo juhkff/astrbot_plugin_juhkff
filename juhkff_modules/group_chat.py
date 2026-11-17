@@ -9,7 +9,6 @@ import time
 from copy import deepcopy
 from uuid import uuid4
 
-from astrbot.api import logger
 from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
@@ -29,6 +28,7 @@ from astrbot.core.utils.media_utils import normalize_model_image_max_size
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 from .common import BaseModule
+from .group_chat_request_log import GroupChatRequestLogger
 from .group_chat_store import RedisGroupChatStore
 
 
@@ -44,6 +44,7 @@ class GroupChatModule(BaseModule):
             self.cfg.get("redis_prefix", "astrbot:juhkff:group_chat"),
         )
         self.retry_at = 0
+        self.request_logger = GroupChatRequestLogger(self)
 
     async def start(self):
         """Connect lazily and remove context left by previous AstrBot processes."""
@@ -53,7 +54,7 @@ class GroupChatModule(BaseModule):
             await self.store.start()
         except Exception:
             self.retry_at = time.monotonic() + 30
-            logger.exception(
+            self.log.exception(
                 "[juhkff] Group context Redis unavailable; retry in 30 seconds"
             )
             raise
@@ -101,7 +102,7 @@ class GroupChatModule(BaseModule):
             and isinstance(cfg, AstrBotConfigSnapshot)
         ):
             event.should_call_llm(True)
-            logger.error(
+            self.log.error(
                 "[juhkff] Framework settings require an isolated message configuration snapshot"
             )
             return False
@@ -182,6 +183,7 @@ class GroupChatModule(BaseModule):
         limit = max(1, min(100, int(self.cfg.get("context_messages", 40))))
         event.set_extra("juhkff_group_context", [])
         event.set_extra("juhkff_group_owned", True)
+        self.request_logger.bind(event)
         ready = False
         record_id = uuid4().hex
         timestamp = time.time()
@@ -217,7 +219,7 @@ class GroupChatModule(BaseModule):
                 event.set_extra("juhkff_group_context", recent)
                 ready = True
             except Exception:
-                logger.warning(
+                self.log.warning(
                     "[juhkff] Group turn has no context because Redis is unavailable"
                 )
         # Store raw references independently of the selected rendering mode.
@@ -251,7 +253,7 @@ class GroupChatModule(BaseModule):
                         (Image(file=ref), source) for ref in refs[:remaining]
                     )
                 except Exception:
-                    logger.exception("[juhkff] Failed to resolve quoted group images")
+                    self.log.exception("[juhkff] Failed to resolve quoted group images")
         for comp, source in components:
             if not isinstance(comp, Image):
                 continue
@@ -263,7 +265,7 @@ class GroupChatModule(BaseModule):
                     images.append(ref)
                     sources.append(source)
             except Exception:
-                logger.exception("[juhkff] Failed to retain original group image")
+                self.log.exception("[juhkff] Failed to retain original group image")
         event.set_extra("juhkff_group_current_images", images)
         if event.get_messages():
             text = await self.formatter._format_message(event, {"image_caption": False})
@@ -278,12 +280,14 @@ class GroupChatModule(BaseModule):
                         event.set_extra("juhkff_group_record_id", record_id)
                         event.set_extra("juhkff_group_image_record", record)
                 except Exception:
-                    logger.exception("[juhkff] Failed to retain original group record")
+                    self.log.exception(
+                        "[juhkff] Failed to retain original group record"
+                    )
         if images and self.cfg.get("image_mode", "original") == "caption":
             try:
                 await self._describe_images(event)
             except Exception:
-                logger.exception("[juhkff] Failed to analyze incoming group images")
+                self.log.exception("[juhkff] Failed to analyze incoming group images")
                 event.set_extra(
                     "juhkff_group_current_caption",
                     [TextPart(text="[Image Captioning Failed]")],
@@ -437,7 +441,7 @@ class GroupChatModule(BaseModule):
                         json.dumps(updated, ensure_ascii=False),
                     )
                 except Exception:
-                    logger.exception("[juhkff] Failed to retain group image caption")
+                    self.log.exception("[juhkff] Failed to retain group image caption")
 
     async def admit(self, event):
         """Admit one turn after other plugins have had a chance to consume it.
@@ -493,7 +497,7 @@ class GroupChatModule(BaseModule):
             or (self.cfg.get("image_mode", "original") == "original" and history_images)
         ):
             event.should_call_llm(True)
-            logger.error(
+            self.log.error(
                 "[juhkff] Image mode requires an isolated message configuration snapshot"
             )
             return None
@@ -520,7 +524,7 @@ class GroupChatModule(BaseModule):
 
             if not supports_modality(selected, "image"):
                 event.should_call_llm(True)
-                logger.error(
+                self.log.error(
                     "[juhkff] Original image mode requires a vision chat provider"
                 )
                 return None
@@ -650,7 +654,7 @@ class GroupChatModule(BaseModule):
                     )
                     content = (await history_req.assemble_context())["content"]
                 except Exception:
-                    logger.exception(
+                    self.log.exception(
                         "[juhkff] Failed to prepare historical group images"
                     )
                     content = text + "\n[Image unavailable]"
@@ -704,7 +708,7 @@ class GroupChatModule(BaseModule):
                 await self.start()
                 await self.store.clear(event.unified_msg_origin)
             except Exception:
-                logger.exception("[juhkff] Failed to clear Redis group context")
+                self.log.exception("[juhkff] Failed to clear Redis group context")
             return
         if not event.get_extra("juhkff_group_owned"):
             return
@@ -737,8 +741,9 @@ class GroupChatModule(BaseModule):
                 )
                 event.set_extra("juhkff_group_reply_recorded", True)
             except Exception:
-                logger.exception("[juhkff] Failed to record bot reply in Redis")
+                self.log.exception("[juhkff] Failed to record bot reply in Redis")
 
     async def stop(self):
-        """Close Redis; preserve stored history across reloads and restarts."""
+        """Remove request hooks and close Redis while preserving stored history."""
+        self.request_logger.close()
         await self.store.close()
