@@ -48,6 +48,17 @@
         "_special": "umo",
         "hint": "选择群聊，可多选，也可手动填写群号；留空应用于所有群，不影响私聊。"
       },
+      "context_messages": {
+        "type": "int",
+        "description": "近期上下文条数",
+        "default": 40,
+        "slider": {
+          "min": 1,
+          "max": 100,
+          "step": 1
+        },
+        "hint": "每个会话保留最近 1～100 条群友消息和机器人回复；每条原文及图片描述各最多 2000 字符，图片 URL/base64 不受此文字截断限制。不按时间过期，重启保留；超出条数上限时移除最旧记录。"
+      },
       "redis_url": {
         "type": "string",
         "description": "Redis 连接地址",
@@ -137,12 +148,6 @@
             "hint": "开启：判断表情包并描述情绪或梗。关闭：只描述图片内容。不影响偷表情功能。"
           }
         }
-      },
-      "image_caption_provider_id": {
-        "type": "string",
-        "description": "旧版图片转述模型（兼容配置）",
-        "default": "",
-        "invisible": true
       },
       "model": {
         "type": "object",
@@ -602,22 +607,17 @@
           }
         }
       },
+      "image_caption_provider_id": {
+        "type": "string",
+        "description": "旧版图片转述模型（兼容配置）",
+        "default": "",
+        "invisible": true
+      },
       "framework": {
         "type": "dict",
         "description": "旧版运行设置（自动迁移）",
         "default": {},
         "invisible": true
-      },
-      "context_messages": {
-        "type": "int",
-        "description": "近期上下文条数",
-        "default": 40,
-        "slider": {
-          "min": 1,
-          "max": 100,
-          "step": 1
-        },
-        "hint": "每个会话保留最近 1～100 条群友消息和机器人回复；每条原文及图片描述各最多 2000 字符，图片 URL/base64 不受此文字截断限制。不按时间过期，重启保留；超出条数上限时移除最旧记录。"
       }
     }
   },
