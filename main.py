@@ -239,7 +239,9 @@ class JuhkffPlugin(Star):
         module = self.modules["group_chat"]
         with ModuleLogger(module).scope():
             request = await module.admit(event)
-        if module.cfg.get("framework") and event.get_extra("juhkff_group_admitted"):
+        if event.get_extra("juhkff_group_runtime_config") and event.get_extra(
+            "juhkff_group_admitted"
+        ):
             # Initialize per event so Core's cached presentation options use this snapshot.
             # Suppress the outer default branch even when the model produces no output.
             event.should_call_llm(True)

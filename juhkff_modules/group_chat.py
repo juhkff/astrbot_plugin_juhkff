@@ -28,6 +28,7 @@ from astrbot.core.utils.media_utils import normalize_model_image_max_size
 from astrbot.core.utils.quoted_message_parser import extract_quoted_message_images
 
 from .common import BaseModule
+from .group_chat_config import FRAMEWORK_FIELDS
 from .group_chat_request_log import GroupChatRequestLogger
 from .group_chat_store import RedisGroupChatStore
 
@@ -38,6 +39,30 @@ class GroupChatModule(BaseModule):
 
     def __init__(self, plugin):
         super().__init__(plugin)
+        framework = self.cfg.get("framework")
+        if isinstance(framework, dict) and framework:
+            # Preserve both legacy layouts before the new UI defaults take effect.
+            migrated = {
+                group: deepcopy(self.cfg.get(group, {})) for group in FRAMEWORK_FIELDS
+            }
+            for group, fields in FRAMEWORK_FIELDS.items():
+                previous = framework.get(group, {})
+                for name, path in fields.items():
+                    if name in previous:
+                        migrated[group][name] = deepcopy(previous[name])
+                        continue
+                    value = framework
+                    for key in path.split("."):
+                        if not isinstance(value, dict) or key not in value:
+                            break
+                        value = value[key]
+                    else:
+                        migrated[group][name] = deepcopy(value)
+            self.cfg.update(migrated)
+            # Clearing the wrapper prevents old values overriding future edits.
+            self.cfg["framework"] = {}
+            if callable(getattr(plugin.config, "save_config", None)):
+                plugin.config.save_config()
         self.formatter = GroupChatContext(None, plugin.context)
         self.store = RedisGroupChatStore(
             self.cfg.get("redis_url", "redis://localhost:6379/0"),
@@ -89,7 +114,13 @@ class GroupChatModule(BaseModule):
         Returns:
             Whether processing can continue without touching shared configuration.
         """
-        framework = self.cfg.get("framework")
+        framework = {
+            group: self.cfg[group]
+            for group in FRAMEWORK_FIELDS
+            if isinstance(self.cfg.get(group), dict)
+        }
+        if not framework:
+            framework = self.cfg.get("framework")
         if not isinstance(framework, dict) or not framework:
             return True
         scope = current_message_config.get()
@@ -106,7 +137,24 @@ class GroupChatModule(BaseModule):
                 "[juhkff] Framework settings require an isolated message configuration snapshot"
             )
             return False
+        # Translate the shallow UI groups without exposing native config nesting.
+        native = {
+            key: deepcopy(value)
+            for key, value in framework.items()
+            if key not in FRAMEWORK_FIELDS
+        }
+        for group, fields in FRAMEWORK_FIELDS.items():
+            values = framework.get(group, {})
+            for name, path in fields.items():
+                if name not in values:
+                    continue
+                target = native
+                parts = path.split(".")
+                for key in parts[:-1]:
+                    target = target.setdefault(key, {})
+                target[parts[-1]] = deepcopy(values[name])
         # Merge leaf values: replacing entire sections would remove core defaults.
+        framework = native
         paths = set(scope.override_paths)
         pending = [(cfg, framework, "")]
         while pending:
@@ -148,6 +196,7 @@ class GroupChatModule(BaseModule):
         # Ignore a stale per-event selection from an earlier handler.
         event.set_extra("selected_provider", None)
         event.set_extra("selected_model", None)
+        event.set_extra("juhkff_group_runtime_config", True)
         return True
 
     async def prepare(self, event):

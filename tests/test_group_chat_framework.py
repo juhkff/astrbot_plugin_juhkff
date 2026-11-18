@@ -177,6 +177,17 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
                 "display_reasoning_text": True,
             }
         )
+        self.module.cfg["reply"] = {
+            key: self.framework["provider_settings"][key]
+            for key in (
+                "streaming_response",
+                "show_tool_use_status",
+                "show_tool_call_result",
+                "buffer_intermediate_messages",
+                "display_reasoning_text",
+            )
+        }
+        self.module.cfg["framework"] = {}
         self.snapshot["provider_settings"]["unsupported_streaming_strategy"] = (
             "realtime_segmenting"
         )
@@ -279,11 +290,14 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
             (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
         )
         self.assertNotIn("context_ttl", schema["group_chat"]["items"])
-        framework_schema = schema["group_chat"]["items"]["framework"]
-        self.assertNotIn(
-            "compression",
-            framework_schema["items"]["agent"]["items"]["config"]["items"],
-        )
+        framework_schema = {
+            "items": {
+                group: schema["group_chat"]["items"][group]
+                for group in ("model", "search", "reply", "tools", "knowledge", "input")
+            }
+        }
+        for group in framework_schema["items"].values():
+            self.assertNotIn("compression", group.get("items", {}))
         values = {}
         pending = [(framework_schema, values)]
         while pending:
@@ -294,15 +308,14 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
                     pending.append((item, result[key]))
                 else:
                     result[key] = deepcopy(item["default"])
-        self.module.cfg["framework"] = values
+        self.module.cfg["framework"] = {}
+        self.module.cfg.update(values)
         self.assertTrue(self.module._apply_framework_config(self.event))
         built = MainAgentBuildConfig.from_config(self.snapshot)
         self.assertEqual(self.snapshot["agent"]["runtime"], "astrbot")
-        self.assertEqual(
-            built.max_steps, values["agent"]["config"]["misc"]["max_steps"]
-        )
+        self.assertEqual(built.max_steps, values["tools"]["max_steps"])
         self.assertEqual(
             built.provider_settings["web_search"],
-            values["provider_settings"]["web_search"],
+            values["search"]["web_search"],
         )
         self.assertEqual(self.shared, self.before)
