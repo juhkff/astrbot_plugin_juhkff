@@ -62,7 +62,7 @@ class EmojiStealModule(BaseModule):
         self._gallery_at = 0.0
 
     def help_entries(self):
-        return [("（自动）", "同一张图被反复发送时自动收藏，并按配置概率随机发出")]
+        return [("（自动）", "同图重复发送时自动收藏，按配置概率从收藏或本地图库发送")]
 
     # ------------------------------------------------------------ Lifecycle
 

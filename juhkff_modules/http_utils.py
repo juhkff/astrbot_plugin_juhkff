@@ -28,7 +28,8 @@ def validate_url(url: str, *, allowed_hosts: set[str] | None = None) -> str:
 
     Returns:
         Normalized logical URL without its fragment. This only checks URL syntax
-        and literal IPs; public_request also resolves and checks every DNS result.
+        and literal IPs; public_request also resolves and checks DNS results,
+        unless explicitly delegating allowlisted origins to a trusted proxy.
 
     Raises:
         ValueError: The URL or host is invalid, forbidden, or outside the allowlist.
@@ -99,18 +100,22 @@ async def public_request(
     *,
     proxy: str | None = None,
     trust_env: bool = False,
+    proxy_resolve: bool = False,
     timeout: float = 20.0,
     max_bytes: int = 3 * 1024 * 1024,
     headers: dict[str, Any] | None = None,
     allowed_hosts: set[str] | None = None,
 ) -> tuple[bytes, str]:
-    """GET a public URL with pinned DNS, bounded redirects, time, and bytes.
+    """GET a public URL with bounded redirects, time, and bytes.
 
     Args:
         url: Absolute public HTTP(S) URL; query parameters must already be encoded.
         proxy: Explicit trusted proxy configuration, including global.proxy when set.
         trust_env: When no explicit proxy is set, resolve environment proxies and
             NO_PROXY against each logical hostname, including proxy BasicAuth.
+        proxy_resolve: Let an explicitly configured trusted proxy resolve exact
+            allowlisted origins instead of local DNS. Other requests retain DNS
+            pinning. The operator's proxy owns destination resolution in this mode.
         timeout: Total wallclock seconds for DNS, redirects, and body consumption.
         max_bytes: Maximum Content-Length and streamed, decompressed body size.
         headers: Optional request headers. Host is always set to the logical host;
@@ -130,6 +135,8 @@ async def public_request(
         raise ValueError("timeout must be positive and finite")
     if not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
+    if proxy_resolve and not allowed_hosts:
+        raise ValueError("Proxy-side DNS requires an explicit host allowlist")
     logical_url = validate_url(url, allowed_hosts=allowed_hosts)
 
     async def request() -> tuple[bytes, str]:
@@ -153,35 +160,45 @@ async def public_request(
                 logical = URL(current)
                 host = logical.raw_host
                 assert host is not None
-                addresses = await asyncio.get_running_loop().getaddrinfo(
-                    host, logical.port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
-                )
-                if not addresses:
-                    raise ValueError("HTTP host has no DNS addresses")
-                approved = []
-                for family, _type, _proto, _name, sockaddr in addresses:
-                    if family not in {socket.AF_INET, socket.AF_INET6}:
-                        raise ValueError("Unsupported HTTP address family")
-                    address = ipaddress.ip_address(sockaddr[0])
-                    if (
-                        not address.is_global
-                        or address.is_multicast
-                        or address.is_reserved
-                    ):
-                        raise ValueError("HTTP DNS contains a non-public address")
-                    if (
-                        isinstance(address, ipaddress.IPv6Address)
-                        and address.ipv4_mapped
-                    ):
-                        if not address.ipv4_mapped.is_global:
+                if proxy_resolve and proxy:
+                    # Fixed service domains can use the operator's proxy DNS and
+                    # domain routing; arbitrary links keep public-IP pinning.
+                    pinned = logical
+                else:
+                    addresses = await asyncio.get_running_loop().getaddrinfo(
+                        host,
+                        logical.port,
+                        family=socket.AF_UNSPEC,
+                        type=socket.SOCK_STREAM,
+                    )
+                    if not addresses:
+                        raise ValueError("HTTP host has no DNS addresses")
+                    approved = []
+                    for family, _type, _proto, _name, sockaddr in addresses:
+                        if family not in {socket.AF_INET, socket.AF_INET6}:
+                            raise ValueError("Unsupported HTTP address family")
+                        address = ipaddress.ip_address(sockaddr[0])
+                        if (
+                            not address.is_global
+                            or address.is_multicast
+                            or address.is_reserved
+                        ):
                             raise ValueError("HTTP DNS contains a non-public address")
-                    approved.append(address.compressed)
-                # Prefer IPv4 on dual-stack hosts, including deployments without
-                # working IPv6 egress. All DNS answers were checked above.
-                approved.sort(key=lambda address: ":" in address)
-                # The proxy must receive an IP destination too. A custom resolver
-                # alone cannot pin an origin resolved by an HTTP proxy.
-                pinned = logical.with_host(approved[0])
+                        if (
+                            isinstance(address, ipaddress.IPv6Address)
+                            and address.ipv4_mapped
+                        ):
+                            if not address.ipv4_mapped.is_global:
+                                raise ValueError(
+                                    "HTTP DNS contains a non-public address"
+                                )
+                        approved.append(address.compressed)
+                    # Prefer IPv4 on dual-stack hosts, including deployments without
+                    # working IPv6 egress. All DNS answers were checked above.
+                    approved.sort(key=lambda address: ":" in address)
+                    # The proxy must receive an IP destination too. A custom resolver
+                    # alone cannot pin an origin resolved by an HTTP proxy.
+                    pinned = logical.with_host(approved[0])
                 request_proxy = proxy or None
                 proxy_auth = None
                 if trust_env and not request_proxy:

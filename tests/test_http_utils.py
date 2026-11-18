@@ -194,6 +194,53 @@ class PublicRequestTests(unittest.IsolatedAsyncioTestCase):
                     force_close=True
                 )
 
+    async def test_proxy_dns_for_allowlisted_origins_avoids_local_dns(self):
+        self.responses = [
+            FakeResponse(302, headers={"Location": "https://images.example/image"}),
+            FakeResponse(chunks=[b"image"]),
+        ]
+        self.dns.side_effect = OSError("Local DNS unavailable or polluted")
+        body, final = await http_utils.public_request(
+            "https://public.example/",
+            proxy="http://127.0.0.1:7890",
+            proxy_resolve=True,
+            allowed_hosts={"public.example", "images.example"},
+            headers={"Cookie": "session=fixture"},
+        )
+        self.assertEqual((body, final), (b"image", "https://images.example/image"))
+        self.dns.assert_not_awaited()
+        calls = self.sessions[-1].calls
+        self.assertEqual([url.host for url, _ in calls], ["public.example", "images.example"])
+        self.assertNotIn("Cookie", calls[1][1]["headers"])
+        self.assertEqual(calls[1][1]["server_hostname"], "images.example")
+        self.assertNotIn("ssl", calls[1][1])
+
+    async def test_proxy_dns_requires_allowlist_and_rejects_foreign_redirects(self):
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            await http_utils.public_request(
+                "https://public.example/", proxy="http://127.0.0.1:7890", proxy_resolve=True
+            )
+        for target in ("https://foreign.example/", "http://127.0.0.1/"):
+            with self.subTest(target=target):
+                self.responses = [FakeResponse(302, headers={"Location": target})]
+                with self.assertRaises(ValueError):
+                    await http_utils.public_request(
+                        "https://public.example/",
+                        proxy="http://127.0.0.1:7890",
+                        proxy_resolve=True,
+                        allowed_hosts={"public.example"},
+                    )
+                self.assertEqual(len(self.sessions[-1].calls), 1)
+        self.dns.assert_not_awaited()
+
+    async def test_proxy_dns_without_explicit_proxy_keeps_pinning(self):
+        self.responses = [FakeResponse(chunks=[b"ok"])]
+        await http_utils.public_request(
+            "https://public.example/", proxy_resolve=True, allowed_hosts={"public.example"}
+        )
+        self.dns.assert_awaited_once()
+        self.assertEqual(self.sessions[-1].calls[0][0].host, "93.184.216.34")
+
     async def test_environment_proxy_and_no_proxy_use_each_logical_url(self):
         self.responses = [
             FakeResponse(302, headers={"Location": "https://other.example/new"}),

@@ -71,6 +71,10 @@ class GroupChatModule(BaseModule):
         self.retry_at = 0
         self.request_logger = GroupChatRequestLogger(self)
 
+    def help_entries(self) -> list[tuple[str, str]]:
+        """Describe the enabled automatic group conversation behavior."""
+        return [("（自动）", "按群概率接话、回应 @；支持图片理解和群聊历史")]
+
     async def start(self):
         """Connect lazily and remove context left by previous AstrBot processes."""
         if time.monotonic() < self.retry_at:

@@ -49,7 +49,13 @@ class DailyReportModule(BaseModule):
         self._refresh_task: asyncio.Task[None] | None = None
 
     def help_entries(self) -> list[tuple[str, str]]:
-        return [("#日报", "生成今日日报：时政、国内社会、游戏、数码")]
+        return [
+            (
+                "#日报 / /日报",
+                "生成今日日报：时政、国内社会、游戏、数码；唤醒后也可发送日报",
+            ),
+            ("（自动）", "可按配置提前生成日报、向指定群定时推送"),
+        ]
 
     async def start(self) -> None:
         """Register optional pre-generation and scheduled delivery jobs."""

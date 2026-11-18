@@ -449,6 +449,7 @@ async def fetch_json(
     params: dict[str, Any] | None = None,
     headers: dict[str, Any] | None = None,
     proxy: str | None = None,
+    proxy_resolve: bool = False,
     timeout: float = 20.0,
     max_bytes: int = 3 * 1024 * 1024,
     allowed_hosts: set[str] | None = None,
@@ -460,6 +461,7 @@ async def fetch_json(
         params: Optional query parameters appended to the existing query.
         headers: Optional caller-controlled request headers.
         proxy: Explicit proxy configured by the operator.
+        proxy_resolve: Delegate allowlisted origin DNS to the explicit proxy.
         timeout: Total request deadline, including redirects and DNS.
         max_bytes: Maximum decompressed response size.
         allowed_hosts: Optional exact host allowlist for all hops.
@@ -477,6 +479,7 @@ async def fetch_json(
         url,
         headers=headers,
         proxy=proxy or None,
+        proxy_resolve=proxy_resolve,
         timeout=timeout,
         max_bytes=max_bytes,
         allowed_hosts=allowed_hosts,
@@ -489,6 +492,7 @@ async def fetch_bytes(
     *,
     headers: dict[str, Any] | None = None,
     proxy: str | None = None,
+    proxy_resolve: bool = False,
     timeout: float = 30.0,
     max_bytes: int = 64 * 1024 * 1024,
     allowed_hosts: set[str] | None = None,
@@ -499,6 +503,7 @@ async def fetch_bytes(
         url: Public HTTP or HTTPS resource.
         headers: Optional caller-controlled request headers.
         proxy: Explicit proxy configured by the operator.
+        proxy_resolve: Delegate allowlisted origin DNS to the explicit proxy.
         timeout: Total request deadline, including redirects and DNS.
         max_bytes: Maximum decompressed response size, independent of compression.
         allowed_hosts: Optional exact host allowlist for all hops.
@@ -510,6 +515,7 @@ async def fetch_bytes(
         url,
         headers=headers,
         proxy=proxy or None,
+        proxy_resolve=proxy_resolve,
         timeout=timeout,
         max_bytes=max_bytes,
         allowed_hosts=allowed_hosts,

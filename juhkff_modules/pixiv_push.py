@@ -1,4 +1,4 @@
-"""Deliver subscribed artists' new illustrations and every page as merged forwards.
+"""Deliver Pixiv subscriptions and browse rankings, random works, and artwork pages.
 
 Subscriptions live only in AstrBotConfig. Version 2 checkpoints contain the
 process owner, artist baselines, per-group watermarks, due times and failure counts.
@@ -17,6 +17,7 @@ import math
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypedDict
 
@@ -25,7 +26,6 @@ from aiohttp import ClientConnectionError
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.platform import MessageType
 
 from .common import (
@@ -39,6 +39,7 @@ from .common import (
     save_json,
 )
 from .http_utils import validate_url
+from .pixiv_browse import PixivBrowseMixin
 
 PROFILE_URL = "https://www.pixiv.net/ajax/user/{user_id}/profile/all?lang=en"
 DETAIL_URL = "https://www.pixiv.net/ajax/illust/{illust_id}"
@@ -76,6 +77,7 @@ class Illustration(ImagePage):
     title: str
     author: str
     page_count: int
+    x_restrict: int
 
 
 def _positive_id(value: object) -> str | None:
@@ -95,9 +97,9 @@ def _positive_id(value: object) -> str | None:
     return text.lstrip("0") or None
 
 
-class PixivPushModule(BaseModule):
+class PixivPushModule(PixivBrowseMixin, BaseModule):
     key = "pixiv_push"
-    title = "Pixiv 订阅"
+    title = "Pixiv 订阅与浏览"
 
     def __init__(self, plugin: PluginLike) -> None:
         super().__init__(plugin)
@@ -110,14 +112,116 @@ class PixivPushModule(BaseModule):
         self._running = asyncio.Lock()
         self._stopped = False
         self._baseline_task: asyncio.Task[None] | None = None
+        self._login_task: asyncio.Task[None] | None = None
         self._checks: set[asyncio.Task[None]] = set()
 
     def help_entries(self) -> list[tuple[str, str]]:
-        return [
+        entries = [
             ("#pixiv订阅 UID", "在本群订阅画师的新插画"),
             ("#pixiv取消订阅 UID", "取消本群对画师的订阅"),
-            ("（自动）", "补齐新插画及全部分页，合并转发；进程重启后重新建立基线"),
+            ("#pixiv日榜 / #pixiv周榜 / #pixiv月榜", "查看榜单；数量由配置决定"),
+            ("#pixiv随机 [关键词]", "搜索结果随机取图，留空从排行榜池抽取"),
+            ("#pixiv作品 ID或链接 [第N张]", "查看作品全部分页或指定页"),
+            ("（自动）", "推送画师新作，可按配置定时推送日榜；单项直发，多项合并转发"),
         ]
+        if self.cfg.get("allow_prefixless", True):
+            entries = [
+                (
+                    command + "（简写：" + command.replace("pixiv", "") + "）",
+                    description + "；简写也可不加 # 或 / 直接发送",
+                )
+                if command.startswith("#pixiv")
+                else (command, description)
+                for command, description in entries
+            ]
+        return entries
+
+    def _api_headers(self) -> dict[str, str]:
+        """Return API headers, keeping login cookies off image hosts."""
+        headers = dict(_BASE_HEADERS)
+        cookie = self.cfg.get("cookie", "")
+        if isinstance(cookie, str) and cookie.strip():
+            cookie = cookie.strip()
+            headers["Cookie"] = cookie if "=" in cookie else f"PHPSESSID={cookie}"
+        return headers
+
+    async def _check_login(self) -> None:
+        """Check the configured session once without logging credentials or errors."""
+        if self._stopped or not self.enabled or not self.log_enabled:
+            return
+        headers = self._api_headers()
+        cookie = headers.get("Cookie", "")
+        if not cookie:
+            self.log.info(
+                "[juhkff] Pixiv login: no Cookie configured; using anonymous requests"
+            )
+            return
+        session = re.search(r"(?:^|;)\s*PHPSESSID=([^;]+)", cookie)
+        if not session or not session[1].strip() or "\r" in cookie or "\n" in cookie:
+            self.log.warning("[juhkff] Pixiv login: Cookie invalid")
+            return
+        message = (
+            "[juhkff] Pixiv login: unexpected server response; status undetermined"
+        )
+        valid = False
+        try:
+            data = await fetch_json(
+                "https://www.pixiv.net/ajax/user/extra",
+                headers=headers,
+                proxy=self.proxy or None,
+                proxy_resolve=True,
+                timeout=15.0,
+                max_bytes=512 * 1024,
+                allowed_hosts=_API_HOSTS,
+            )
+            if isinstance(data, dict):
+                if data.get("error") is False and isinstance(data.get("body"), dict):
+                    valid = True
+                    message = "[juhkff] Pixiv login: valid"
+                elif data.get("error") is True and re.search(
+                    r"login|log in|ログイン|登录|登入",
+                    str(data.get("message", "")),
+                    re.I,
+                ):
+                    message = "[juhkff] Pixiv login: Cookie invalid"
+        except (ClientConnectionError, OSError, asyncio.TimeoutError):
+            message = "[juhkff] Pixiv login: network error; status undetermined"
+        except RuntimeError as exc:
+            if str(exc).startswith("HTTP 401 "):
+                message = "[juhkff] Pixiv login: Cookie invalid"
+        except Exception:
+            pass  # Malformed responses must not break startup or expose secrets.
+        if self._stopped or not self.enabled or headers != self._api_headers():
+            return
+        if valid:
+            self.log.info(message)
+        else:
+            self.log.warning(message)
+
+    def _content_policy(self, umo: str) -> tuple[bool, str]:
+        """Resolve the first matching group override for filtering and delivery.
+
+        Args:
+            umo: Fully qualified destination group origin.
+
+        Returns:
+            Whether restricted content is filtered and its allowed display mode.
+        """
+        filtered = self.cfg.get("filter_r18", True) is not False
+        display = self.cfg.get("r18_display", "link")
+        rules = self.cfg.get("group_content_rules", [])
+        for rule in rules if isinstance(rules, list) else []:
+            if not isinstance(rule, dict):
+                continue
+            groups = rule.get("groups", [])
+            if not isinstance(groups, list) or not any(
+                group in (umo, umo.split(":", 2)[-1]) for group in groups
+            ):
+                continue
+            filtered = rule.get("filter_r18", filtered) is not False
+            display = rule.get("r18_display", display)
+            break
+        return filtered, "image" if display == "image" else "link"
 
     def _subscriptions(self) -> dict[str, list[str]]:
         """Read a fresh normalized subscription snapshot from configuration.
@@ -241,12 +345,18 @@ class PixivPushModule(BaseModule):
         await self.scheduler.every_minutes(
             1, self.check, "pixiv-check", tz_name=self.tz_name
         )
-        self.log.info("[juhkff] Pixiv artist subscriptions ready")
+        await self.start_browse()
+        self._login_task = asyncio.create_task(
+            self._check_login(), name="juhkff-pixiv-login-check"
+        )
+        self.log.info("[juhkff] Pixiv subscriptions and browsing ready")
 
     async def stop(self) -> None:
         """Cancel and await startup work and any in-flight scheduled checks."""
         self._stopped = True
         tasks = set(self._checks)
+        if self._login_task is not None:
+            tasks.add(self._login_task)
         if self._baseline_task is not None:
             tasks.add(self._baseline_task)
         current = asyncio.current_task()
@@ -258,6 +368,7 @@ class PixivPushModule(BaseModule):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._checks.clear()
         self._baseline_task = None
+        self._login_task = None
 
     def intercepts(self, event: AstrMessageEvent) -> bool:
         """Reserve valid and malformed subscription commands before passive handlers.
@@ -268,12 +379,10 @@ class PixivPushModule(BaseModule):
         Returns:
             Whether this module owns the command, including missing arguments.
         """
-        text = (event.message_str or "").strip()
-        if text.startswith(("#", "/")):
-            text = text[1:]
-        elif not event.is_at_or_wake_command:
-            return False
-        return text.startswith(("pixiv订阅", "pixiv取消订阅"))
+        text = self._command_text(event)
+        return text.startswith(
+            ("pixiv订阅", "pixiv取消订阅")
+        ) or self.browse_intercepts(event)
 
     async def handle(self, event: AstrMessageEvent) -> MessageChain | None:
         """Persist the current group's subscription changes before replying.
@@ -284,13 +393,13 @@ class PixivPushModule(BaseModule):
         Returns:
             A concise command response, or None for unrelated messages.
         """
+        if self.browse_intercepts(event):
+            return await self.handle_browse(event)
         if not self.intercepts(event):
             return None
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             return event.plain_result("Pixiv 订阅仅限群聊使用。")
-        text = (event.message_str or "").strip()
-        if text.startswith(("#", "/")):
-            text = text[1:]
+        text = self._command_text(event)
         match = re.fullmatch(r"pixiv(订阅|取消订阅)\s+([0-9]+)", text)
         user_id = _positive_id(match.group(2)) if match else None
         if match is None or user_id is None:
@@ -466,23 +575,12 @@ class PixivPushModule(BaseModule):
         if not new_ids:
             return True
 
-        works: list[tuple[Illustration, list[Path]]] = []
+        works: list[Illustration] = []
         for illust_id in new_ids:
             item = await self._fetch_detail(illust_id)
             if not self._groups(user_id) or self._artists.get(user_id) is not state:
                 return True
-            pages = await self._fetch_pages(item)
-            if not self._groups(user_id) or self._artists.get(user_id) is not state:
-                return True
-            images: list[Path] = []
-            for index, page in enumerate(pages):
-                image = await self._download(item, page, index, user_id)
-                if not self._groups(user_id) or self._artists.get(user_id) is not state:
-                    return True
-                if image is None:
-                    return False
-                images.append(image)
-            works.append((item, images))
+            works.append(item)
 
         for group in self._groups(user_id):
             if not self._groups(user_id) or self._artists.get(user_id) is not state:
@@ -492,21 +590,26 @@ class PixivPushModule(BaseModule):
             watermark = state["delivered"].get(group, last_id)
             if not _after(latest, watermark):
                 continue
-            pending = [
-                (item, images)
-                for item, images in works
-                if _after(item["id"], watermark)
-            ]
+            pending = [item for item in works if _after(item["id"], watermark)]
             try:
                 umo = resolve_umo(self.plugin.context, group)
-                bot_id = await self._get_bot_id(umo)
+                chain = await self._render_items(
+                    pending,
+                    umo,
+                    delivery_active=lambda group=group: (
+                        self._artists.get(user_id) is state
+                        and group in self._groups(user_id)
+                    ),
+                )
                 if (
                     group not in self._groups(user_id)
                     or self._artists.get(user_id) is not state
                 ):
                     continue
-                sent = await self.plugin.context.send_message(
-                    umo, self._compose(pending, bot_id)
+                sent = (
+                    await self.plugin.context.send_message(umo, chain)
+                    if chain is not None
+                    else True
                 )
                 if sent is False:
                     raise RuntimeError("Pixiv delivery found no matching platform")
@@ -516,9 +619,7 @@ class PixivPushModule(BaseModule):
                     state["delivered"][group] = latest
                     self._persist_state()
             except Exception:
-                self.log.exception(
-                    "[juhkff] Pixiv merged-forward delivery failed: %s", group
-                )
+                self.log.exception("[juhkff] Pixiv artwork delivery failed: %s", group)
         groups = self._groups(user_id)
         if not groups or self._artists.get(user_id) is not state:
             return True
@@ -552,10 +653,11 @@ class PixivPushModule(BaseModule):
         """
         data = await fetch_json(
             PROFILE_URL.format(user_id=user_id),
-            headers=_BASE_HEADERS,
+            headers=self._api_headers(),
             proxy=self.proxy or None,
             timeout=25.0,
             allowed_hosts=_API_HOSTS,
+            proxy_resolve=True,
         )
         if not isinstance(data, dict) or data.get("error") is not False:
             raise ValueError("Pixiv profile API returned an error or invalid response")
@@ -589,10 +691,11 @@ class PixivPushModule(BaseModule):
         """
         data = await fetch_json(
             DETAIL_URL.format(illust_id=illust_id),
-            headers=_BASE_HEADERS,
+            headers=self._api_headers(),
             proxy=self.proxy or None,
             timeout=25.0,
             allowed_hosts=_API_HOSTS,
+            proxy_resolve=True,
         )
         if not isinstance(data, dict) or data.get("error") is not False:
             raise ValueError("Pixiv illustration API returned an error")
@@ -628,6 +731,11 @@ class PixivPushModule(BaseModule):
             "title": title,
             "author": author,
             "page_count": page_count,
+            "x_restrict": (
+                body["xRestrict"]
+                if type(body.get("xRestrict")) is int and body["xRestrict"] in (0, 1, 2)
+                else -1
+            ),
             "regular": regular,
             "original": original,
         }
@@ -648,10 +756,11 @@ class PixivPushModule(BaseModule):
             return [{"original": item["original"], "regular": item["regular"]}]
         data = await fetch_json(
             PAGES_URL.format(illust_id=item["id"]),
-            headers=_BASE_HEADERS,
+            headers=self._api_headers(),
             proxy=self.proxy or None,
             timeout=25.0,
             allowed_hosts=_API_HOSTS,
+            proxy_resolve=True,
         )
         if not isinstance(data, dict) or data.get("error") is not False:
             raise ValueError("Pixiv pages API returned an error")
@@ -678,7 +787,14 @@ class PixivPushModule(BaseModule):
         return pages
 
     async def _download(
-        self, item: Illustration, page: ImagePage, index: int, user_id: str
+        self,
+        item: Illustration,
+        page: ImagePage,
+        index: int,
+        user_id: str | None = None,
+        *,
+        source_only: bool = False,
+        delivery_active: Callable[[], bool] | None = None,
     ) -> Path | None:
         """Cache a page's original bytes and optionally derive a compressed copy.
 
@@ -686,13 +802,15 @@ class PixivPushModule(BaseModule):
             item: Validated illustration metadata.
             page: Source URLs returned for this page.
             index: Zero-based page index.
-            user_id: Artist whose subscription must remain active.
+            user_id: Artist whose subscription must remain active, if applicable.
+            source_only: Preserve source bytes without preview fallback or compression.
+            delivery_active: Optional subscription identity and membership guard.
 
         Returns:
             A verified original or explicitly compressed image, or None on failure.
         """
         try:
-            limit_mb = float(self.cfg.get("max_image_mb", 0))
+            limit_mb = 0.0 if source_only else float(self.cfg.get("max_image_mb", 0))
             if not math.isfinite(limit_mb) or limit_mb < 0:
                 raise ValueError("Invalid Pixiv compression threshold")
             limit = int(limit_mb * 1024 * 1024)
@@ -700,7 +818,7 @@ class PixivPushModule(BaseModule):
             folder.mkdir(parents=True, exist_ok=True)
             # Source bytes stay separate from regular previews, old flat caches,
             # and size-dependent derivatives, including after configuration changes.
-            for kind in ("original", "regular"):
+            for kind in ("original",) if source_only else ("original", "regular"):
                 url = page[kind]
                 candidates: list[str | Path] = [
                     path
@@ -715,7 +833,12 @@ class PixivPushModule(BaseModule):
                     )
                 )
                 for candidate in candidates:
-                    if not self._groups(user_id):
+                    if (
+                        self._stopped
+                        or not self.enabled
+                        or (user_id is not None and not self._groups(user_id))
+                        or (delivery_active is not None and not delivery_active())
+                    ):
                         return None
                     try:
                         if (
@@ -735,12 +858,23 @@ class PixivPushModule(BaseModule):
                                 timeout=40.0,
                                 max_bytes=_MAX_IMAGE_BYTES,
                                 allowed_hosts=_IMAGE_HOSTS,
+                                proxy_resolve=True,
                             )
                         )
-                        if not self._groups(user_id):
+                        if (
+                            self._stopped
+                            or not self.enabled
+                            or (user_id is not None and not self._groups(user_id))
+                            or (delivery_active is not None and not delivery_active())
+                        ):
                             return None
                         raw = await asyncio.to_thread(_prepare_image, payload, 0)
-                        if not self._groups(user_id):
+                        if (
+                            self._stopped
+                            or not self.enabled
+                            or (user_id is not None and not self._groups(user_id))
+                            or (delivery_active is not None and not delivery_active())
+                        ):
                             return None
                         if raw is None:
                             continue
@@ -755,7 +889,12 @@ class PixivPushModule(BaseModule):
                         prepared = await asyncio.to_thread(
                             _prepare_image, raw_bytes, limit
                         )
-                        if not self._groups(user_id):
+                        if (
+                            self._stopped
+                            or not self.enabled
+                            or (user_id is not None and not self._groups(user_id))
+                            or (delivery_active is not None and not delivery_active())
+                        ):
                             return None
                         if prepared is None:
                             continue
@@ -818,42 +957,6 @@ class PixivPushModule(BaseModule):
             raise RuntimeError("Pixiv forward sender ID is unavailable")
         self._bot_ids[platform_id] = bot_id
         return bot_id
-
-    def _compose(
-        self, works: list[tuple[Illustration, list[Path]]], bot_id: str
-    ) -> MessageChain:
-        """Compose one native merged forward containing every work and page.
-
-        Args:
-            works: Illustrations in ID order with their page images in page order.
-            bot_id: Real account ID used as the forward-node sender.
-
-        Returns:
-            One Nodes component, with one captioned image node per page.
-
-        Raises:
-            ValueError: No complete illustration is available to send.
-        """
-        nodes: list[Node] = []
-        for item, images in works:
-            if len(images) != item["page_count"]:
-                raise ValueError("Pixiv forward omitted an illustration page")
-            for index, image in enumerate(images):
-                caption = (
-                    f"{item['author']}\n{item['title']}\n"
-                    f"https://www.pixiv.net/artworks/{item['id']}\n"
-                    f"第 {index + 1}/{item['page_count']} 张"
-                )
-                nodes.append(
-                    Node(
-                        name="Pixiv 订阅",
-                        uin=bot_id,
-                        content=[Plain(caption), Image.fromFileSystem(str(image))],
-                    )
-                )
-        if not nodes:
-            raise ValueError("Pixiv forward has no pages")
-        return MessageChain([Nodes(nodes)])
 
 
 def _after(illust_id: str, checkpoint: str) -> bool:

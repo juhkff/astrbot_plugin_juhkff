@@ -192,6 +192,30 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
                         self.assertTrue(event.is_stopped())
                         self.assert_no_chat()
 
+    async def test_prefixless_pixiv_commands_pass_real_wake_stage(self):
+        for prefix in ("", "#", "/", "!"):
+            for command in (
+                "订阅 7",
+                "取消订阅 7",
+                "日榜",
+                "周榜",
+                "月榜",
+                "随机 猫",
+                "作品 7 第1张",
+            ):
+                event = self.event(prefix + command)
+                await self.wake(event)
+                await self.dispatch(event)
+                event.send.assert_awaited_once()
+                self.assertTrue(event.is_stopped())
+                self.assert_no_chat()
+        self.card.handle.assert_not_awaited()
+        self.plugin.config["pixiv_push"]["allow_prefixless"] = False
+        for text in ("日榜", "#订阅 7", "/随机 猫"):
+            event = self.event(text)
+            await self.wake(event)
+            self.assertFalse(self.pixiv.intercepts(event))
+
     async def test_removed_pixiv_ranking_commands_do_not_reply_or_chat(self):
         for command in ("/pixiv", "/pixiv 最新", "#pixiv"):
             for address in (None, "at", "reply"):

@@ -1,6 +1,7 @@
 {
   "global": {
     "type": "object",
+    "collapsed": true,
     "description": "全局设置",
     "hint": "所有功能共用的开关、代理和时区。",
     "items": {
@@ -26,6 +27,7 @@
   },
   "group_chat": {
     "type": "object",
+    "collapsed": true,
     "description": "主动群聊",
     "hint": "可禁用官方 astrbot 系统插件，仅由本模块负责群聊触发和 Redis 上下文；模型、人格与工具复用框架核心。历史不按时间过期，重启保留，不修改官方配置。",
     "items": {
@@ -623,6 +625,7 @@
   },
   "share_parse": {
     "type": "object",
+    "collapsed": true,
     "description": "卡片解析",
     "hint": "自动提取分享卡片的标题、简介和链接，可附带封面；不处理普通文字链接。",
     "items": {
@@ -680,6 +683,7 @@
   },
   "emoji_steal": {
     "type": "object",
+    "collapsed": true,
     "description": "偷表情",
     "hint": "同群相同图片在指定时长内出现两次后收藏，并按概率随机发送表情。",
     "items": {
@@ -793,6 +797,7 @@
   },
   "daily_report": {
     "type": "object",
+    "collapsed": true,
     "description": "日报",
     "hint": "发送 #日报 获取今日日报，包含时政、国内社会、游戏、数码四类新闻，每类最多 12 条。",
     "items": {
@@ -907,8 +912,9 @@
   },
   "pixiv_push": {
     "type": "object",
-    "description": "Pixiv 订阅",
-    "hint": "订阅画师新插画，将新作和全部图片合并转发。首次订阅或重启 AstrBot 后，首次检查只记录最新作品，不补推旧作。",
+    "collapsed": true,
+    "description": "Pixiv 订阅与浏览",
+    "hint": "订阅画师新插画，查看日榜、周榜、月榜，随机取图或按作品 ID 点图。首次订阅或重启后只记录最新作品；日榜自动推送默认关闭。所有入口共用下方内容规则、图片缓存和压缩设置。",
     "items": {
       "print_log": {
         "description": "打印日志",
@@ -920,6 +926,160 @@
         "description": "启用",
         "type": "bool",
         "default": true
+      },
+      "allow_prefixless": {
+        "description": "支持命令无pixiv前缀",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后可用 #订阅 UID、#取消订阅 UID、日榜、周榜、月榜、随机 [关键词]、作品 ID或链接 [第N张]；简写可带 #、/ 或直接发送。"
+      },
+      "filter_r18": {
+        "description": "过滤 R18 作品",
+        "type": "bool",
+        "default": true,
+        "hint": "开启时过滤 xRestrict 非 0 的作品。统一作用于订阅、榜单、随机和点图；匹配分群内容规则时使用该群设置。"
+      },
+      "r18_display": {
+        "description": "R18 展示方式",
+        "type": "string",
+        "options": [
+          "link",
+          "image"
+        ],
+        "labels": [
+          "原图链接",
+          "源图片"
+        ],
+        "default": "link",
+        "hint": "关闭 R18 过滤后生效：原图链接发送真实原图地址，源图片发送图片；每张图片或其原图链接均计 1 项，2 项及以上合并转发。"
+      },
+      "group_content_rules": {
+        "description": "分群内容规则",
+        "type": "template_list",
+        "default": [],
+        "hint": "覆盖指定群的 R18 过滤及展示方式；同群匹配多条时只用第一条，未匹配时沿用全局设置。适用群留空的规则不生效。",
+        "templates": {
+          "rule": {
+            "name": "分群内容设置",
+            "items": {
+              "groups": {
+                "description": "适用群",
+                "type": "list",
+                "default": [],
+                "_special": "umo",
+                "hint": "通过与画师订阅相同的会话选择器选择群，可多选；留空则此规则不生效。"
+              },
+              "filter_r18": {
+                "description": "过滤 R18 作品",
+                "type": "bool",
+                "default": true,
+                "hint": "开启时过滤 xRestrict 非 0 的作品，作用于本群的订阅、榜单、随机和点图。"
+              },
+              "r18_display": {
+                "description": "R18 展示方式",
+                "type": "string",
+                "options": [
+                  "link",
+                  "image"
+                ],
+                "labels": [
+                  "原图链接",
+                  "源图片"
+                ],
+                "default": "link",
+                "hint": "本群关闭过滤后生效：发送真实原图地址，或发送源图片。"
+              }
+            }
+          }
+        }
+      },
+      "cookie": {
+        "description": "Pixiv PHPSESSID（可选）",
+        "type": "string",
+        "secret": true,
+        "default": "",
+        "hint": "只需填写 PHPSESSID 的值，无需 PHPSESSID= 前缀；兼容完整 Cookie，留空则未登录。"
+      },
+      "ranking": {
+        "description": "榜单设置",
+        "type": "object",
+        "items": {
+          "count": {
+            "description": "榜单作品数量",
+            "type": "int",
+            "default": 5,
+            "slider": {
+              "min": 1,
+              "max": 20,
+              "step": 1
+            },
+            "hint": "日榜、周榜、月榜及日榜自动推送最多发送的作品数；仅在此配置，榜单命令不接收数量参数。每篇展示全部分页，并附原排名、标题、画师和作品链接；数量按作品数计算。"
+          },
+          "pool_pages": {
+            "description": "无关键词随机池页数",
+            "type": "int",
+            "default": 5,
+            "slider": {
+              "min": 1,
+              "max": 10,
+              "step": 1
+            },
+            "hint": "无关键词的 #pixiv随机 从日榜读取这些页构建较大的候选池，再随机选择作品。"
+          },
+          "daily_push": {
+            "description": "日榜自动推送",
+            "type": "object",
+            "items": {
+              "enable": {
+                "description": "启用日榜自动推送",
+                "type": "bool",
+                "default": false,
+                "hint": "默认关闭；开启并选择接收群后按时间推送日榜，不影响画师订阅。"
+              },
+              "time": {
+                "description": "日榜推送时间",
+                "type": "string",
+                "default": "09:00",
+                "hint": "填写 24 小时制 HH:MM，如 09:00；使用全局设置中的时区。"
+              },
+              "groups": {
+                "description": "日榜接收群",
+                "type": "list",
+                "default": [],
+                "_special": "umo",
+                "hint": "选择自动接收日榜的群，可多选；留空不推送日榜，不影响画师订阅。"
+              }
+            }
+          }
+        }
+      },
+      "random": {
+        "description": "随机作品设置",
+        "type": "object",
+        "items": {
+          "count": {
+            "description": "随机作品数量",
+            "type": "int",
+            "default": 1,
+            "slider": {
+              "min": 1,
+              "max": 10,
+              "step": 1
+            },
+            "hint": "每次 #pixiv随机 最多发送的作品数量，作品默认包含全部分页。"
+          },
+          "search_pages": {
+            "description": "关键词搜索页数",
+            "type": "int",
+            "default": 3,
+            "slider": {
+              "min": 1,
+              "max": 10,
+              "step": 1
+            },
+            "hint": "有关键词或标签时，从这些搜索结果页中随机选择作品。"
+          }
+        }
       },
       "subscriptions": {
         "description": "画师订阅列表",
@@ -984,6 +1144,7 @@
   },
   "help": {
     "type": "object",
+    "collapsed": true,
     "description": "帮助图",
     "hint": "发送帮助指令，查看本插件已启用功能的用法；默认指令为 #帮助。",
     "items": {

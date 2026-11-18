@@ -1,0 +1,421 @@
+"""Browse Pixiv rankings, random works, and artwork pages without subscriptions."""
+
+from __future__ import annotations
+
+import asyncio
+import random
+import re
+from collections.abc import Callable
+from urllib.parse import quote
+
+from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.message_components import Image, Node, Nodes, Plain
+from astrbot.api.platform import MessageType
+
+from .common import fetch_json
+
+_COMMANDS = ("pixiv日榜", "pixiv周榜", "pixiv月榜", "pixiv随机", "pixiv作品")
+_USAGE = (
+    "用法：#pixiv日榜 / #pixiv周榜 / #pixiv月榜（不带参数）；"
+    "#pixiv随机 [标签/关键词]；#pixiv作品 ID或Pixiv作品链接 [第N张]"
+)
+
+
+def _bounded(value: object, default: int, maximum: int) -> int:
+    """Read a bounded integer without modifying configuration.
+
+    Args:
+        value: Untrusted configuration value.
+        default: Fallback for malformed values.
+        maximum: Inclusive upper bound.
+
+    Returns:
+        An integer between one and maximum.
+    """
+    try:
+        return max(1, min(maximum, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+class PixivBrowseMixin:
+    """Add browsing to a host implementing Pixiv detail, pages, and download APIs."""
+
+    def _command_text(self, event: AstrMessageEvent) -> str:
+        """Normalize optional Pixiv aliases without modifying the incoming event.
+
+        Args:
+            event: Incoming event with its original command text.
+
+        Returns:
+            Canonical command text, or an empty string for unwoken full commands.
+        """
+        text = (event.message_str or "").strip()
+        marked = text.startswith(("#", "/"))
+        if marked:
+            text = text[1:]
+        if self.cfg.get("allow_prefixless", True) and re.match(
+            r"(?:取消订阅|订阅|日榜|周榜|月榜|随机|作品)(?:\s|$)", text
+        ):
+            return "pixiv" + text
+        return text if marked or event.is_at_or_wake_command else ""
+
+    def browse_intercepts(self, event: AstrMessageEvent) -> bool:
+        """Claim browse commands, including malformed arguments.
+
+        Args:
+            event: Incoming event, optionally stripped of its wake prefix.
+
+        Returns:
+            Whether the event belongs to Pixiv browsing.
+        """
+        return self._command_text(event).startswith(_COMMANDS)
+
+    async def handle_browse(self, event: AstrMessageEvent) -> MessageChain | None:
+        """Validate a browse command and return ordinary image components.
+
+        Args:
+            event: Incoming command event.
+
+        Returns:
+            A reply chain, or None for an unrelated message.
+        """
+        if not self.browse_intercepts(event):
+            return None
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            return event.plain_result("Pixiv 浏览仅限群聊使用。")
+        if self._stopped or not self.enabled:
+            return event.plain_result("Pixiv 功能已停用。")
+        text = self._command_text(event)
+        origin = event.unified_msg_origin
+        try:
+            if text in _COMMANDS[:3]:
+                mode = dict(zip(_COMMANDS[:3], ("daily", "weekly", "monthly")))[text]
+                result = await self._browse_selection(origin, mode=mode)
+            elif re.fullmatch(r"pixiv随机(?:\s+.*)?", text):
+                keyword = text[len("pixiv随机") :].strip()
+                result = await self._browse_selection(
+                    origin, mode="daily", keyword=keyword, randomized=True
+                )
+            elif text.startswith("pixiv作品"):
+                match = re.fullmatch(
+                    r"pixiv作品\s+(?:([0-9]+)|https?://(?:www\.)?pixiv\.net/"
+                    r"(?:[a-z]{2}/)?artworks/([0-9]+)(?:\?[^\s]*)?)"
+                    r"(?:\s+第\s*([0-9]+)\s*张)?",
+                    text,
+                )
+                if match is None:
+                    return event.plain_result(_USAGE)
+                iid = (match.group(1) or match.group(2)).lstrip("0")
+                if not iid or (match.group(3) and int(match.group(3)) < 1):
+                    return event.plain_result(_USAGE)
+                item = await self._fetch_detail(iid)
+                page = int(match.group(3)) - 1 if match.group(3) else None
+                if page is not None and page >= item["page_count"]:
+                    return event.plain_result(
+                        f"该作品共 {item['page_count']} 张，页码超出范围。"
+                    )
+                if page is not None:
+                    item = {**item, "_browse_page": page}
+                result = await self._render_items([item], origin)
+            else:
+                return event.plain_result(_USAGE)
+            if self._stopped or not self.enabled:
+                return event.plain_result("Pixiv 功能已停用。")
+            return result or event.plain_result("未找到符合本群内容策略的可用作品。")
+        except Exception:
+            self.log.exception("[juhkff] Pixiv browse request failed")
+            return event.plain_result(
+                "Pixiv 请求或图片下载失败，请稍后重试（搜索可能需要配置 Cookie）。"
+            )
+
+    async def _browse_candidates(
+        self, mode: str, pages: int, keyword: str = ""
+    ) -> list[tuple[str, int | None]]:
+        """Read a bounded multi-page candidate pool from the official API.
+
+        Args:
+            mode: Official ranking mode.
+            pages: Maximum number of result pages.
+            keyword: Search query, or empty to read rankings.
+
+        Returns:
+            Unique artwork IDs with original ranking positions where available.
+
+        Raises:
+            ValueError: The endpoint returned an error or invalid collection.
+        """
+        candidates = []
+        seen = set()
+        for page in range(1, pages + 1):
+            if self._stopped or not self.enabled:
+                break
+            url = (
+                f"https://www.pixiv.net/ajax/search/artworks/{quote(keyword, safe='')}"
+                if keyword
+                else "https://www.pixiv.net/ranking.php"
+            )
+            params = (
+                {
+                    "word": keyword,
+                    "p": page,
+                    "s_mode": "s_tc",
+                    "type": "all",
+                    "order": "date_d",
+                    "mode": "all",
+                    "lang": "zh",
+                }
+                if keyword
+                else {"mode": mode, "format": "json", "p": page}
+            )
+            data = await fetch_json(
+                url,
+                params=params,
+                headers=self._api_headers(),
+                proxy=self.proxy or None,
+                timeout=25.0,
+                allowed_hosts={"www.pixiv.net"},
+                proxy_resolve=True,
+            )
+            if not isinstance(data, dict) or data.get("error"):
+                raise ValueError("Pixiv browse API returned an error")
+            if keyword:
+                body = data.get("body")
+                collection = body.get("illustManga") if isinstance(body, dict) else None
+                rows = collection.get("data") if isinstance(collection, dict) else None
+            else:
+                rows = data.get("contents")
+            if not isinstance(rows, list):
+                raise ValueError("Pixiv browse API omitted its artwork collection")
+            if not rows:
+                break
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    continue
+                iid = str(row.get("id" if keyword else "illust_id", ""))
+                if not re.fullmatch(r"[0-9]+", iid) or not (iid := iid.lstrip("0")):
+                    continue
+                if iid in seen:
+                    continue
+                seen.add(iid)
+                rank = row.get("rank", (page - 1) * 50 + index + 1)
+                if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
+                    rank = (page - 1) * 50 + index + 1
+                candidates.append((iid, None if keyword else rank))
+        return candidates
+
+    async def _browse_selection(
+        self, origin: str, *, mode: str, keyword: str = "", randomized: bool = False
+    ) -> MessageChain | None:
+        """Select usable works, replenishing filtered or failed candidates.
+
+        Args:
+            origin: Fully qualified destination group.
+            mode: Official ranking mode.
+            keyword: Optional search query.
+            randomized: Whether to shuffle a multi-page candidate pool.
+
+        Returns:
+            A chain containing the requested number of usable works if available.
+
+        Raises:
+            RuntimeError: Every candidate failed to load.
+        """
+        ranking = self.cfg.get("ranking") or {}
+        settings = (self.cfg.get("random") or {}) if randomized else ranking
+        count = _bounded(
+            settings.get("count"), 1 if randomized else 5, 10 if randomized else 20
+        )
+        pages = _bounded(
+            settings.get("search_pages") if keyword else ranking.get("pool_pages"),
+            3 if keyword else 5,
+            10,
+        )
+        if not randomized:
+            pages = 1
+        candidates = await self._browse_candidates(mode, pages, keyword)
+        if randomized:
+            random.shuffle(candidates)
+        selected = []
+        ranks = {}
+        failures = 0
+        for iid, rank in candidates:
+            if self._stopped or not self.enabled:
+                break
+            try:
+                item = await self._fetch_detail(iid)
+                restriction = item.get("x_restrict", -1)
+                if restriction not in (0, 1, 2) or (
+                    restriction != 0 and self._content_policy(origin)[0]
+                ):
+                    continue
+                selected.append(item)
+                if rank is not None:
+                    ranks[iid] = rank
+                if len(selected) >= count:
+                    break
+            except Exception:
+                failures += 1
+                self.log.exception("[juhkff] Pixiv browse candidate failed: %s", iid)
+        if not selected and failures:
+            raise RuntimeError("Pixiv candidates could not be loaded")
+        return await self._render_items(
+            selected,
+            origin,
+            ranks=None if randomized else ranks,
+        )
+
+    async def _render_items(
+        self,
+        items: list[dict],
+        umo: str,
+        *,
+        ranks: dict[str, int] | None = None,
+        delivery_active: Callable[[], bool] | None = None,
+    ) -> MessageChain | None:
+        """Render filtered pages, counting image links toward merged forwarding.
+
+        Args:
+            items: Validated host details in display order.
+            umo: Fully qualified destination group.
+            ranks: Artwork IDs mapped to their original ranking positions.
+            delivery_active: Optional subscription identity and membership guard.
+
+        Returns:
+            A direct or merged message, or None if every work was filtered.
+
+        Raises:
+            RuntimeError: Delivery stopped or a required image failed to download.
+        """
+
+        def ensure_active() -> None:
+            if (
+                self._stopped
+                or not self.enabled
+                or (delivery_active is not None and not delivery_active())
+            ):
+                raise RuntimeError("Pixiv delivery stopped")
+
+        ensure_active()
+        entries = []
+        filter_r18, display = self._content_policy(umo)
+        for item in items:
+            restriction = item.get("x_restrict", -1)
+            restricted = restriction != 0
+            if restriction not in (0, 1, 2) or (restricted and filter_r18):
+                continue
+            ensure_active()
+            pages = await self._fetch_pages(item)
+            ensure_active()
+            requested_page = item.get("_browse_page")
+            indices = (
+                [requested_page] if requested_page is not None else range(len(pages))
+            )
+            for index in indices:
+                ensure_active()
+                source = pages[index]
+                rank = (ranks or {}).get(item["id"])
+                caption = (
+                    (f"排名 #{rank}\n" if rank is not None else "")
+                    + f"{item['title']}\n{item['author']}\n"
+                    + f"https://www.pixiv.net/artworks/{item['id']}\n"
+                    + f"第 {index + 1}/{item['page_count']} 张\n"
+                )
+                if restricted and display == "link":
+                    if not source.get("original"):
+                        raise RuntimeError(
+                            "Pixiv restricted page omitted its original URL"
+                        )
+                    content = [Plain(caption + source["original"] + "\n")]
+                else:
+                    options = {"source_only": True} if restricted else {}
+                    if delivery_active is not None:
+                        options["delivery_active"] = delivery_active
+                    image = await self._download(
+                        item, source, index, user_id=None, **options
+                    )
+                    ensure_active()
+                    if image is None:
+                        raise RuntimeError("Pixiv artwork page download failed")
+                    content = [Plain(caption), Image.fromFileSystem(str(image))]
+                entries.append(content)
+        ensure_active()
+        if not entries:
+            return None
+        if self._content_policy(umo) != (filter_r18, display):
+            raise RuntimeError("Pixiv content policy changed during rendering")
+        if len(entries) < 2:
+            return MessageChain([component for entry in entries for component in entry])
+        bot_id = await self._get_bot_id(umo)
+        ensure_active()
+        if self._content_policy(umo) != (filter_r18, display):
+            raise RuntimeError("Pixiv content policy changed during rendering")
+        return MessageChain(
+            [
+                Nodes(
+                    [Node(name="Pixiv", uin=bot_id, content=entry) for entry in entries]
+                )
+            ]
+        )
+
+    async def start_browse(self) -> None:
+        """Register the independent daily ranking task when configured."""
+        self._browse_daily_running = False
+        daily = (self.cfg.get("ranking") or {}).get("daily_push") or {}
+        if daily.get("enable", False):
+            await self.scheduler.daily(
+                daily.get("time", "09:00"),
+                self.push_daily_ranking,
+                "pixiv-daily-ranking",
+                tz_name=self.tz_name,
+            )
+
+    async def push_daily_ranking(self) -> None:
+        """Push daily rankings independently per group, without overlapping runs."""
+        if getattr(self, "_browse_daily_running", False):
+            return
+        self._browse_daily_running = True
+        task = asyncio.current_task()
+        if task is not None:
+            self._checks.add(task)
+        try:
+            daily = (self.cfg.get("ranking") or {}).get("daily_push") or {}
+            if self._stopped or not self.enabled or not daily.get("enable", False):
+                return
+            groups = daily.get("groups", [])
+            if not isinstance(groups, list):
+                return
+            for origin in dict.fromkeys(
+                group for group in groups if isinstance(group, str)
+            ):
+                parts = origin.split(":", 2)
+                if (
+                    len(parts) != 3
+                    or not parts[0]
+                    or parts[1] != "GroupMessage"
+                    or not parts[2]
+                ):
+                    continue
+                try:
+                    result = await self._browse_selection(origin, mode="daily")
+                    current = (self.cfg.get("ranking") or {}).get("daily_push") or {}
+                    if (
+                        self._stopped
+                        or not self.enabled
+                        or not current.get("enable", False)
+                    ):
+                        break
+                    if result is not None and origin in current.get("groups", []):
+                        sent = await self.plugin.context.send_message(origin, result)
+                        if sent is False:
+                            raise RuntimeError(
+                                "Pixiv ranking destination is unavailable"
+                            )
+                except Exception:
+                    self.log.exception(
+                        "[juhkff] Pixiv daily ranking failed: %s", origin
+                    )
+        finally:
+            self._browse_daily_running = False
+            if task is not None:
+                self._checks.discard(task)

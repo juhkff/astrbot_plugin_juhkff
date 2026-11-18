@@ -152,7 +152,7 @@ class ShareParseModule(BaseModule):
         return None
 
     def help_entries(self):
-        return [("分享卡片", "自动解析 B 站 / 小黑盒分享卡片，并补上封面图")]
+        return [("分享卡片", "按配置解析 B 站 / 小黑盒 / 通用分享卡片，可补封面图")]
 
     async def _build_reply(
         self, event: AstrMessageEvent, card: dict[str, Any], platform: str

@@ -184,6 +184,14 @@ class HelpGenModule(BaseModule):
             return None
         return await self._reply(event)
 
+    def help_entries(self) -> list[tuple[str, str]]:
+        """Expose the configured help command and plugin status command."""
+        command = str(self.cfg.get("command") or "帮助").strip().lstrip("#")
+        return [
+            (f"#{command}", "查看已启用功能的命令和用法"),
+            ("/juhkff", "查看插件版本、总开关和各模块启停状态"),
+        ]
+
     # ------------------------------------------------------------ Content
 
     def _sections(self) -> list[dict[str, Any]]:
