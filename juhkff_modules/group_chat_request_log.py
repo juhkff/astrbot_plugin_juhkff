@@ -213,11 +213,22 @@ class GroupChatRequestLogger:
                 "content", message.get("parts", message.get("output"))
             )
             text = cls._format_content(content)
+            reasoning = cls._format_content(message.get("reasoning_content"))
+            if reasoning.strip():
+                text += "\nreasoning：\n" + reasoning
             # Keep tool IDs and arguments so subsequent tool turns remain traceable.
             extras = {
                 key: value
                 for key, value in message.items()
-                if key not in {"role", "content", "parts", "output", "type"}
+                if key
+                not in {
+                    "role",
+                    "content",
+                    "parts",
+                    "output",
+                    "type",
+                    "reasoning_content",
+                }
             }
             if extras:
                 text += ("\n" if text else "") + json.dumps(

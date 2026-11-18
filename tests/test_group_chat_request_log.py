@@ -337,6 +337,75 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
                 self.assertEqual(json.loads(self.received[-1].content), body)
         self.warning.assert_not_called()
 
+    async def test_empty_reasoning_is_hidden_without_changing_wire(self):
+        self.request_logger.bind(self.event)
+        for extra in (
+            {},
+            {"reasoning_content": ""},
+            {"reasoning_content": None},
+            {"reasoning_content": " \n\t"},
+        ):
+            with self.subTest(extra=extra):
+                body = {
+                    "messages": [
+                        {"role": "assistant", "content": "你好，最近怎么样？", **extra}
+                    ]
+                }
+                await self.post(body)
+                entry = self.entries()[-1]
+                self.assertTrue(entry.endswith("\nassistant：你好，最近怎么样？"))
+                self.assertNotIn("reasoning", entry)
+                self.assertEqual(json.loads(self.received[-1].content), body)
+        self.warning.assert_not_called()
+
+    async def test_nonempty_reasoning_is_readable_and_preserves_tool_calls(self):
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "我查一下。",
+                    "reasoning_content": "需要查询实时天气。\n先使用搜索工具。",
+                    "tool_calls": [
+                        {
+                            "id": "call-weather",
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": '{"query":"weather"}',
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-weather", "content": "晴天"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "查询完成。",
+                },
+            ]
+        }
+        self.request_logger.bind(self.event)
+        await self.post(body)
+        (entry,) = self.entries()
+        self.assertIn(
+            "\nassistant：我查一下。\nreasoning：\n需要查询实时天气。\n先使用搜索工具。",
+            entry,
+        )
+        self.assertIn("\nassistant：\nreasoning：\n查询完成。", entry)
+        self.assertNotIn('"reasoning_content"', entry)
+        for value in (
+            "tool_calls",
+            "call-weather",
+            "search",
+            "arguments",
+            "weather",
+            "晴天",
+        ):
+            self.assertIn(value, entry)
+        self.assert_role_order(entry, ("assistant", "tool", "assistant"))
+        self.assertEqual(json.loads(self.received[-1].content), body)
+        self.warning.assert_not_called()
+
     async def test_multiple_images_omit_only_base64_in_logs(self):
         png = "QUJD" * 6000 + "=="
         jpeg = "ZGVm" * 7000 + "=="
