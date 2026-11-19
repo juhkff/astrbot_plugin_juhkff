@@ -1146,6 +1146,20 @@
         "default": "00:00",
         "hint": "HH:MM 格式，默认每天 0 点执行，采用全局时区。修改后重载插件生效。"
       },
+      "image_transport": {
+        "description": "图片传递方式",
+        "type": "string",
+        "default": "base64",
+        "options": [
+          "base64",
+          "file"
+        ],
+        "labels": [
+          "Base64（兼容独立部署）",
+          "本地文件（同机部署，单条转发）"
+        ],
+        "hint": "AstrBot 与 NapCat 共用文件系统时可选择本地文件，只传绝对文件路径，多图保持一条合并转发，保留全部原图和分页；NapCat 必须有权限读取图片缓存。不同容器须挂载相同路径，否则使用 Base64；Base64 模式按体积分批发送。手动取图和定时推送共用此设置。"
+      },
       "max_image_mb": {
         "description": "图片压缩阈值（MB）",
         "type": "float",

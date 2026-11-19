@@ -13,6 +13,7 @@ from urllib.parse import quote
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import (
     BaseMessageComponent,
+    ComponentType,
     Image,
     Node,
     Nodes,
@@ -28,6 +29,19 @@ _USAGE = (
     "用法：#pixiv日榜 / #pixiv周榜 / #pixiv月榜（不带参数）；"
     "#pixiv随机 [标签/关键词]；#pixiv作品 ID或Pixiv作品链接 [第N张]"
 )
+
+
+class OneBotFileImage(BaseMessageComponent):
+    """Pass a local image URI through OneBot without expanding it into base64.
+
+    Attributes:
+        file: Absolute file URI readable by the protocol process.
+    """
+
+    # The adapter expands every Image instance, including subclasses, to base64.
+    # The base component's serializer already emits the required image segment.
+    type: ComponentType = ComponentType.Image
+    file: str
 
 
 def _bounded(value: object, default: int, maximum: int) -> int:
@@ -346,6 +360,7 @@ class PixivBrowseMixin:
         ensure_active()
         entries = []
         entry_sizes: list[int] = []
+        local_files = self.cfg.get("image_transport", "base64") == "file"
         filter_r18, display = self._content_policy(umo)
         self.log.info("[juhkff] Pixiv preparing artwork pages: works=%s", len(items))
         for item in items:
@@ -395,14 +410,21 @@ class PixivBrowseMixin:
                     ensure_active()
                     if image is None:
                         raise RuntimeError("Pixiv artwork page download failed")
-                    content = [Plain(caption), Image.fromFileSystem(str(image))]
-                    # OneBot expands local images to base64 inside each request.
-                    # Account for that expansion and escaped text before grouping.
-                    entry_size = (
-                        4 * ((image.stat().st_size + 2) // 3)
-                        + len(json.dumps(caption))
-                        + 512
-                    )
+                    if local_files:
+                        file_uri = image.resolve(strict=True).as_uri()
+                        content = [Plain(caption), OneBotFileImage(file=file_uri)]
+                        entry_size = (
+                            len(json.dumps(file_uri)) + len(json.dumps(caption)) + 512
+                        )
+                    else:
+                        content = [Plain(caption), Image.fromFileSystem(str(image))]
+                        # OneBot expands local images to base64 inside each request.
+                        # Account for that expansion and escaped text before grouping.
+                        entry_size = (
+                            4 * ((image.stat().st_size + 2) // 3)
+                            + len(json.dumps(caption))
+                            + 512
+                        )
                 entries.append(content)
                 entry_sizes.append(entry_size)
         ensure_active()
@@ -423,7 +445,7 @@ class PixivBrowseMixin:
         nodes: list[Node] = []
         batch_size = 1024
         for entry, size in zip(entries, entry_sizes):
-            if nodes and batch_size + size > _FORWARD_BATCH_BYTES:
+            if not local_files and nodes and batch_size + size > _FORWARD_BATCH_BYTES:
                 batches.append(Nodes(nodes))
                 nodes = []
                 batch_size = 1024
@@ -433,9 +455,10 @@ class PixivBrowseMixin:
             batches.append(Nodes(nodes))
         self.log.info(
             "[juhkff] Pixiv forward batches ready: batches=%s, items=%s, "
-            "estimated_bytes=%s",
+            "transport=%s, estimated_bytes=%s",
             len(batches),
             len(entries),
+            "file" if local_files else "base64",
             sum(entry_sizes) + 1024 * len(batches),
         )
         return MessageChain(batches)
