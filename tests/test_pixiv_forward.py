@@ -11,6 +11,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from juhkff_modules import pixiv_push as pixiv
+from pixiv_test_utils import page_nodes
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Nodes
@@ -84,8 +85,11 @@ class PixivForwardTests(IsolatedAsyncioTestCase):
                 assert result is not None
                 nodes = result.chain[0]
                 assert isinstance(nodes, Nodes)
-                self.assertEqual(len(nodes.nodes), count)
-                self.assertTrue(all(node.uin == sender for node in nodes.nodes))
+                self.assertEqual(len(page_nodes(nodes.nodes)), count)
+                self.assertEqual(len(nodes.nodes), 1 if "作品" in command else 10)
+                self.assertTrue(
+                    all(node.uin == sender for node in page_nodes(nodes.nodes))
+                )
         self.lookup.assert_not_called()
 
     async def test_background_lookup_caches_a_valid_account(self):
@@ -143,8 +147,9 @@ class PixivForwardTests(IsolatedAsyncioTestCase):
             self.assertEqual(call.args[0], origin)
             nodes = call.args[1].chain[0]
             self.assertIsInstance(nodes, Nodes)
-            self.assertEqual(len(nodes.nodes), 2)
-            self.assertTrue(all(node.uin == sender for node in nodes.nodes))
+            self.assertEqual(len(nodes.nodes), 1)
+            self.assertEqual(len(page_nodes(nodes.nodes)), 2)
+            self.assertTrue(all(node.uin == sender for node in page_nodes(nodes.nodes)))
         action.assert_not_awaited()
 
     async def test_background_reads_live_connection_after_account_changes(self):

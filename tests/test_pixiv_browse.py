@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from juhkff_modules import pixiv_browse as browse
 from PIL import Image as PILImage
+from pixiv_test_utils import page_nodes
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Nodes, Plain
@@ -174,7 +175,8 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.host._get_bot_id.assert_not_awaited()
         result = await self.host._render_items([item(pages=3)], self.umo)
         self.assertIsInstance(at(result), Nodes)
-        self.assertEqual(len(at(result).nodes), 3)
+        self.assertEqual(len(at(result).nodes), 1)
+        self.assertEqual(len(page_nodes(at(result).nodes)), 3)
         self.assertEqual(
             [call.args[2] for call in self.host._download.await_args_list[-3:]],
             [0, 1, 2],
@@ -185,6 +187,73 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 for call in self.host._download.await_args_list
             )
         )
+
+    async def test_mixed_works_serialize_as_flat_single_images_and_nested_albums(self):
+        for transport in ("base64", "file"):
+            with self.subTest(transport=transport):
+                self.host.cfg["image_transport"] = transport
+                result = must(
+                    await self.host._render_items(
+                        [item("1"), item("2", pages=3), item("3")],
+                        self.umo,
+                        ranks={"1": 4, "2": 7, "3": 10},
+                        bot_id="123",
+                    )
+                )
+                action = AsyncMock(return_value={"message_id": 1})
+                await AiocqhttpMessageEvent.send_message(
+                    bot=cast(Any, SimpleNamespace(call_action=action)),
+                    message_chain=result,
+                    is_group=True,
+                    session_id="1",
+                )
+                action.assert_awaited_once()
+                call = awaited(action)
+                works = call.kwargs["messages"]
+                self.assertEqual(len(works), 3)
+                for index, iid, rank in ((0, "1", 4), (2, "3", 10)):
+                    content = works[index]["data"]["content"]
+                    self.assertEqual(
+                        [part["type"] for part in content], ["text", "image"]
+                    )
+                    self.assertIn(f"/artworks/{iid}\n", content[0]["data"]["text"])
+                    self.assertIn(f"排名 #{rank}", content[0]["data"]["text"])
+                pages = works[1]["data"]["content"]
+                self.assertEqual(len(pages), 3)
+                for page in pages:
+                    self.assertEqual(page["type"], "node")
+                    self.assertNotIn("messages", page)
+                    content = page["data"]["content"]
+                    self.assertEqual(
+                        [part["type"] for part in content], ["text", "image"]
+                    )
+                    self.assertIn("/artworks/2\n", content[0]["data"]["text"])
+                    self.assertIn("排名 #7", content[0]["data"]["text"])
+                self.assertNotRegex(
+                    json.dumps(works, ensure_ascii=False), r"第\s*\d+/\d+\s*张"
+                )
+
+    async def test_base64_batch_boundaries_keep_every_work_page_in_order(self):
+        self.host.cfg["image_transport"] = "base64"
+        with patch.object(browse, "_FORWARD_BATCH_BYTES", 4096):
+            result = must(
+                await self.host._render_items(
+                    [item("1", pages=3), item("2", pages=3)], self.umo, bot_id="123"
+                )
+            )
+        self.assertGreater(len(result.chain), 1)
+        captions = []
+        for batch in result.chain:
+            assert isinstance(batch, Nodes)
+            payload = await batch.to_dict()
+            self.assertLess(len(json.dumps(payload).encode()), 4096)
+            for page in page_nodes(batch.nodes):
+                caption = page.content[0]
+                assert isinstance(caption, Plain)
+                captions.append(caption.text)
+        self.assertEqual(len(captions), 6)
+        for caption, iid in zip(captions, ("1", "1", "1", "2", "2", "2")):
+            self.assertIn(f"/artworks/{iid}\n", caption)
 
     async def test_reported_26_original_images_are_split_without_losing_pages(self):
         sizes = [
@@ -314,7 +383,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     host._get_bot_id.assert_not_awaited()
                 else:
                     self.assertIsInstance(at(result), Nodes)
-                    self.assertEqual(len(at(result).nodes), count)
+                    self.assertEqual(len(page_nodes(at(result).nodes)), count)
                     host._get_bot_id.assert_awaited_once_with(self.umo)
                 self.assertEqual(host._download.await_count, downloads)
         self.host._content_policy.return_value = (False, "image")
@@ -325,10 +394,14 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         result = await self.host._render_items(
             [item(pages=4)], self.umo, ranks={"7": 19}
         )
-        self.assertEqual(len(at(result).nodes), 4)
-        for index, node in enumerate(at(result).nodes):
-            self.assertIn("排名 #19", node.content[0].text)
-            self.assertIn(f"第 {index + 1}/4 张", node.content[0].text)
+        self.assertEqual(len(at(result).nodes), 1)
+        nodes = page_nodes(at(result).nodes)
+        self.assertEqual(len(nodes), 4)
+        for node in nodes:
+            caption = node.content[0]
+            assert isinstance(caption, Plain)
+            self.assertIn("排名 #19", caption.text)
+            self.assertNotRegex(caption.text, r"第\s*\d+/\d+\s*张")
         self.host._fetch_pages.assert_awaited_once()
         self.host._download.return_value = None
         with self.assertRaises(RuntimeError):
@@ -342,7 +415,8 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.assertIsInstance(at(reply, 1), Image)
         self.assertEqual(awaited(self.host._download).args[2], 1)
         reply = await self.host.handle_browse(event("#pixiv作品 7"))
-        self.assertEqual(len(at(reply).nodes), 3)
+        self.assertEqual(len(at(reply).nodes), 1)
+        self.assertEqual(len(page_nodes(at(reply).nodes)), 3)
         reply = await self.host.handle_browse(event("#pixiv作品 7 第4张"))
         self.assertIn("超出范围", at(reply).text)
 
@@ -366,7 +440,8 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     result = awaited(host.plugin.context.send_message).args[1]
                 else:
                     result = await host.handle_browse(event(command))
-                nodes = at(result).nodes
+                self.assertEqual(len(at(result).nodes), 2)
+                nodes = page_nodes(at(result).nodes)
                 self.assertEqual(len(nodes), 5)
                 self.assertEqual(
                     [call.args[0] for call in host._fetch_detail.await_args_list],
@@ -376,16 +451,16 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     [call.args[2] for call in host._download.await_args_list],
                     [0, 1, 0, 1, 2],
                 )
-                for node, iid, rank, page, total in zip(
+                for node, iid, rank in zip(
                     nodes,
                     ["7", "7", "8", "8", "8"],
                     [9, 9, 20, 20, 20],
-                    [1, 2, 1, 2, 3],
-                    [2, 2, 3, 3, 3],
                 ):
-                    self.assertIn(f"排名 #{rank}\n", node.content[0].text)
-                    self.assertIn(f"/artworks/{iid}\n", node.content[0].text)
-                    self.assertIn(f"第 {page}/{total} 张", node.content[0].text)
+                    caption = node.content[0]
+                    assert isinstance(caption, Plain)
+                    self.assertIn(f"排名 #{rank}\n", caption.text)
+                    self.assertIn(f"/artworks/{iid}\n", caption.text)
+                    self.assertNotRegex(caption.text, r"第\s*\d+/\d+\s*张")
                     self.assertIsInstance(node.content[1], Image)
 
     async def test_ranking_raw_json_pages_and_api_allowlist(self):

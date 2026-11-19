@@ -333,7 +333,7 @@ class PixivBrowseMixin:
         delivery_active: Callable[[], bool] | None = None,
         bot_id: str | None = None,
     ) -> MessageChain | None:
-        """Render filtered pages, counting image links toward merged forwarding.
+        """Render works as outer nodes, nesting the pages of multi-image works.
 
         Args:
             items: Validated host details in display order.
@@ -360,6 +360,7 @@ class PixivBrowseMixin:
         ensure_active()
         entries = []
         entry_sizes: list[int] = []
+        entry_work_ids: list[str] = []
         local_files = self.cfg.get("image_transport", "base64") == "file"
         filter_r18, display = self._content_policy(umo)
         self.log.info("[juhkff] Pixiv preparing artwork pages: works=%s", len(items))
@@ -389,7 +390,6 @@ class PixivBrowseMixin:
                     (f"排名 #{rank}\n" if rank is not None else "")
                     + f"{item['title']}\n{item['author']}\n"
                     + f"https://www.pixiv.net/artworks/{item['id']}\n"
-                    + f"第 {index + 1}/{item['page_count']} 张\n"
                 )
                 if restricted and display == "link":
                     if not source.get("original"):
@@ -427,6 +427,7 @@ class PixivBrowseMixin:
                         )
                 entries.append(content)
                 entry_sizes.append(entry_size)
+                entry_work_ids.append(item["id"])
         ensure_active()
         if not entries:
             return None
@@ -444,12 +445,27 @@ class PixivBrowseMixin:
         batches: list[BaseMessageComponent] = []
         nodes: list[Node] = []
         batch_size = 1024
-        for entry, size in zip(entries, entry_sizes):
+        previous_work = None
+        work_node: Node | None = None
+        for entry, size, work_id in zip(entries, entry_sizes, entry_work_ids):
             if not local_files and nodes and batch_size + size > _FORWARD_BATCH_BYTES:
                 batches.append(Nodes(nodes))
                 nodes = []
                 batch_size = 1024
-            nodes.append(Node(name="Pixiv", uin=bot_id, content=entry))
+                previous_work = None
+                work_node = None
+            page_node = Node(name="Pixiv", uin=bot_id, content=entry)
+            if work_id == previous_work:
+                if work_node is None:
+                    # Node content accepts nested node segments. Nodes itself is
+                    # an API envelope, not a segment that can go inside content.
+                    work_node = Node(name="Pixiv", uin=bot_id, content=[nodes.pop()])
+                    nodes.append(work_node)
+                work_node.content.append(page_node)
+            else:
+                nodes.append(page_node)
+                work_node = None
+                previous_work = work_id
             batch_size += size
         if nodes:
             batches.append(Nodes(nodes))

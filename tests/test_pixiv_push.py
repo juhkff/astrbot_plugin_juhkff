@@ -13,10 +13,11 @@ from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, Mock, patch
 
-from astrbot.api.event import AstrMessageEvent
-
 from juhkff_modules import pixiv_push as pixiv
 from PIL import Image
+from pixiv_test_utils import page_nodes
+
+from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image as MessageImage
 from astrbot.api.message_components import Plain
 
@@ -307,7 +308,11 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             self.assertFalse(await self.module._check_artist("7"))
         first_calls = self.plugin.context.send_message.await_args_list
         self.assertEqual(
-            [len(call.args[1].chain[0].nodes) for call in first_calls], [3, 3]
+            [len(page_nodes(call.args[1].chain[0].nodes)) for call in first_calls],
+            [3, 3],
+        )
+        self.assertEqual(
+            [len(call.args[1].chain[0].nodes) for call in first_calls], [2, 2]
         )
         self.assertEqual(
             self.module._artists["7"],
@@ -318,7 +323,8 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         self.module._fetch_ids.return_value = ["1", "2", "3", "4"]
         self.assertTrue(await self.module._check_artist("7"))
         calls = self.plugin.context.send_message.await_args_list
-        self.assertEqual(len(calls[1].args[1].chain[0].nodes), 4)
+        self.assertEqual(len(page_nodes(calls[1].args[1].chain[0].nodes)), 4)
+        self.assertEqual(len(calls[1].args[1].chain[0].nodes), 3)
         self.assertIn("Work 4", calls[0].args[1].chain[0].text)
         self.assertEqual(
             sum(isinstance(c, MessageImage) for c in calls[0].args[1].chain), 1
