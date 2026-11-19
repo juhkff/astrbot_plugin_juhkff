@@ -201,9 +201,10 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 result = await self.host._render_items([work], self.umo)
                 caption = at(result).text
                 self.assertIn(
-                    "新作\nArtist\nhttps://www.pixiv.net/artworks/7\n", caption
+                    "作品名：新作\n作者名：Artist\n作品链接：https://www.pixiv.net/artworks/7\n",
+                    caption,
                 )
-                self.assertIn("よろしく\nお願いします\n", caption)
+                self.assertIn("作品说明：\nよろしく\nお願いします\n", caption)
         self.host.plugin.context.get_current_chat_provider_id.assert_not_awaited()
         self.host.plugin.context.llm_generate.assert_not_awaited()
 
@@ -220,8 +221,9 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             with self.subTest(settings=settings):
                 self.host.cfg["auto_translate"] = settings
                 result = await self.host._render_items([work], self.umo)
-                self.assertIn("译名\nArtist\n", at(result).text)
+                self.assertIn("作品名：译名\n作者名：Artist\n", at(result).text)
                 self.assertNotIn("多余说明", at(result).text)
+                self.assertNotIn("作品说明：", at(result).text)
                 request = awaited(self.host.plugin.context.llm_generate).kwargs
                 self.assertEqual(request["chat_provider_id"], "group-model")
                 self.assertEqual(json.loads(request["prompt"])["language"], expected)
@@ -248,7 +250,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     completion_text=completion
                 )
                 result = await self.host._render_items([work], self.umo)
-                self.assertIn("新作\nArtist\n", at(result).text)
+                self.assertIn("作品名：新作\n作者名：Artist\n", at(result).text)
                 self.assertIn("よろしく\n", at(result).text)
         context.get_current_chat_provider_id.side_effect = RuntimeError("no provider")
         context.llm_generate.reset_mock()
@@ -316,13 +318,13 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                         [part["type"] for part in content], ["text", "image"]
                     )
                     self.assertIn(f"/artworks/{iid}\n", content[0]["data"]["text"])
-                    self.assertIn(f"排名 #{rank}", content[0]["data"]["text"])
+                    self.assertIn(f"排名：#{rank}", content[0]["data"]["text"])
                 pages = works[1]["data"]["content"]
                 self.assertEqual(len(pages), 4)
                 header = pages[0]["data"]["content"]
                 self.assertEqual([part["type"] for part in header], ["text"])
                 self.assertIn("/artworks/2\n", header[0]["data"]["text"])
-                self.assertIn("排名 #7", header[0]["data"]["text"])
+                self.assertIn("排名：#7", header[0]["data"]["text"])
                 for page in pages[1:]:
                     self.assertEqual(page["type"], "node")
                     self.assertNotIn("messages", page)
@@ -506,7 +508,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(nodes), 4)
         header = at(result).nodes[0].content[0].content[0]
         self.assertIsInstance(header, Plain)
-        self.assertIn("排名 #19", header.text)
+        self.assertIn("排名：#19", header.text)
         self.assertNotRegex(header.text, r"第\s*\d+/\d+\s*张")
         for node in nodes:
             self.assertEqual(len(node.content), 1)
@@ -569,7 +571,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     self.assertEqual(len(work.content), count + 1)
                     caption = work.content[0].content[0]
                     assert isinstance(caption, Plain)
-                    self.assertIn(f"排名 #{rank}\n", caption.text)
+                    self.assertIn(f"排名：#{rank}\n", caption.text)
                     self.assertIn(f"/artworks/{iid}\n", caption.text)
                     self.assertNotRegex(caption.text, r"第\s*\d+/\d+\s*张")
                     for node in work.content[1:]:
@@ -695,7 +697,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             iid, restriction=1 if iid == "7" else 0
         )
         result = await self.host.handle_browse(event("#pixiv日榜"))
-        self.assertIn("排名 #13", at(result).text)
+        self.assertIn("排名：#13", at(result).text)
         self.host._fetch_pages.assert_awaited_once()
         self.assertEqual(awaited(self.host._download).args[0]["id"], "8")
 

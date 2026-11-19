@@ -268,8 +268,8 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
                 assert call is not None
                 pages = call.kwargs["messages"][0]["data"]["content"]
                 header = pages[0]["data"]["content"][0]["data"]["text"]
-                self.assertIn("新作品\nArtist\n", header)
-                self.assertIn("请多关照\n谢谢支持", header)
+                self.assertIn("作品名：新作品\n作者名：Artist\n", header)
+                self.assertIn("作品说明：\n请多关照\n谢谢支持", header)
                 for page in pages[1:]:
                     self.assertEqual(len(page["data"]["content"]), 1)
                     self.assertEqual(page["data"]["content"][0]["type"], "image")

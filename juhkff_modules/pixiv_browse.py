@@ -448,10 +448,10 @@ class PixivBrowseMixin:
                 ensure_active()
             rank = (ranks or {}).get(item["id"])
             caption = (
-                (f"排名 #{rank}\n" if rank is not None else "")
-                + f"{title}\n{item['author']}\n"
-                + f"https://www.pixiv.net/artworks/{item['id']}\n"
-                + (f"{description}\n" if description else "")
+                (f"排名：#{rank}\n" if rank is not None else "")
+                + f"作品名：{title}\n作者名：{item['author']}\n"
+                + f"作品链接：https://www.pixiv.net/artworks/{item['id']}\n"
+                + (f"作品说明：\n{description}\n" if description else "")
             )
             work_captions[item["id"]] = caption
             requested_page = item.get("_browse_page")
