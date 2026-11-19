@@ -411,7 +411,7 @@ class PixivBrowseMixin:
         entry_sizes: list[int] = []
         entry_work_ids: list[str] = []
         work_captions: dict[str, str] = {}
-        local_files = self.cfg.get("image_transport", "base64") == "file"
+        local_files = self.cfg.get("image_transport", "file") == "file"
         translation = self.cfg.get("auto_translate") or {}
         translate = translation.get("enable", False)
         language = str(translation.get("language") or "").strip() or "中文"

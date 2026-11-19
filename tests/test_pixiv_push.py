@@ -18,8 +18,7 @@ from PIL import Image
 from pixiv_test_utils import page_nodes
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Image as MessageImage
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import ComponentType, Plain
 
 
 def awaited(mock: Any) -> Any:
@@ -361,7 +360,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(calls[1].args[1].chain[0].nodes), 3)
         self.assertIn("Work 4", calls[0].args[1].chain[0].text)
         self.assertEqual(
-            sum(isinstance(c, MessageImage) for c in calls[0].args[1].chain), 1
+            sum(c.type == ComponentType.Image for c in calls[0].args[1].chain), 1
         )
         self.assertEqual(self.module._artists["7"], {"last_id": "4", "delivered": {}})
 

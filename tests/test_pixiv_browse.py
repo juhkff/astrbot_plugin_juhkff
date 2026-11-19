@@ -29,6 +29,7 @@ class BrowseHost(browse.PixivBrowseMixin):
         self.cfg: dict[str, Any] = {
             "ranking": {"count": 2, "pool_pages": 2},
             "random": {"count": 2},
+            "image_transport": "base64",
         }
         self._stopped = False
         self.enabled = True

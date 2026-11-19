@@ -58,7 +58,6 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
                 "pixiv_push": {
                     "enable": True,
                     "print_log": False,
-                    "image_transport": "file",
                     "ranking": {
                         "count": 1,
                         "pool_pages": 1,
