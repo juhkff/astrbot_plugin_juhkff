@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, Mock, patch
 
 from juhkff_modules import pixiv_browse as browse
+from PIL import Image as PILImage
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Nodes, Plain
 from astrbot.api.platform import MessageType
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 
 
 class BrowseHost(browse.PixivBrowseMixin):
-    def __init__(self):
+    def __init__(self, image: Path):
         self.cfg: dict[str, Any] = {
             "ranking": {"count": 2, "pool_pages": 2},
             "random": {"count": 2},
@@ -34,7 +41,7 @@ class BrowseHost(browse.PixivBrowseMixin):
         self._fetch_pages = AsyncMock(
             side_effect=lambda work: [work] * work["page_count"]
         )
-        self._download = AsyncMock(return_value=Path("/tmp/pixiv-fixture.png"))
+        self._download = AsyncMock(return_value=image)
         self._get_bot_id = AsyncMock(return_value="123")
         self.scheduler = SimpleNamespace(daily=AsyncMock())
         self.plugin = SimpleNamespace(
@@ -88,7 +95,12 @@ def awaited(mock: Any) -> Any:
 
 class PixivBrowseTests(IsolatedAsyncioTestCase):
     def setUp(self):
-        self.host = BrowseHost()
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.folder = Path(temporary.name)
+        self.image = self.folder / "fixture.png"
+        PILImage.new("RGB", (2, 2), "red").save(self.image)
+        self.host = BrowseHost(self.image)
         self.umo = "test:GroupMessage:1"
 
     async def test_commands_reject_arguments_private_and_disabled(self):
@@ -174,6 +186,115 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_reported_26_original_images_are_split_without_losing_pages(self):
+        sizes = [
+            719690,
+            293536,
+            373906,
+            438679,
+            418768,
+            11667933,
+            509386,
+            456940,
+            1275573,
+            2418402,
+            792994,
+            3477315,
+            3370210,
+            3559094,
+            2841131,
+            3497185,
+            3108067,
+            6673711,
+            3824806,
+            3892357,
+            3523878,
+            4092132,
+            9786165,
+            5706298,
+            6075923,
+            9204814,
+        ]
+        images = []
+        for index, size in enumerate(sizes):
+            path = self.folder / f"original-{index}.png"
+            with path.open("wb") as output:
+                output.truncate(size)
+            images.append(path)
+        self.host._download.side_effect = lambda work, *args, **kwargs: images[
+            int(work["id"]) - 1
+        ]
+        result = must(
+            await self.host._render_items(
+                [item(str(i)) for i in range(1, 27)], self.umo, bot_id="123"
+            )
+        )
+        self.assertGreater(len(result.chain), 1)
+        nodes = []
+        for batch in result.chain:
+            assert isinstance(batch, Nodes)
+            nodes.extend(batch.nodes)
+        self.assertEqual(len(nodes), 26)
+        self.assertEqual([path.stat().st_size for path in images], sizes)
+        for index, node in enumerate(nodes, 1):
+            caption = node.content[0]
+            assert isinstance(caption, Plain)
+            self.assertIn(f"/artworks/{index}\n", caption.text)
+            self.assertEqual(node.uin, "123")
+
+    async def test_onebot_sends_separate_bounded_requests_with_original_bytes(self):
+        self.host._content_policy.return_value = (False, "link")
+        works = [item(str(i), restriction=i % 2) for i in range(1, 13)]
+        with patch.object(browse, "_FORWARD_BATCH_BYTES", 4096):
+            result = must(await self.host._render_items(works, self.umo, bot_id="123"))
+        action = AsyncMock(return_value={"message_id": 1})
+        await AiocqhttpMessageEvent.send_message(
+            bot=cast(Any, SimpleNamespace(call_action=action)),
+            message_chain=result,
+            is_group=True,
+            session_id="1",
+        )
+        self.assertGreater(action.await_count, 1)
+        nodes = []
+        images = links = 0
+        for call in action.await_args_list:
+            self.assertEqual(call.args[0], "send_group_forward_msg")
+            self.assertEqual(call.kwargs["group_id"], "1")
+            self.assertLessEqual(len(json.dumps(call.kwargs).encode()), 4096)
+            nodes.extend(call.kwargs["messages"])
+        self.assertEqual(len(nodes), 12)
+        for index, node in enumerate(nodes, 1):
+            content = node["data"]["content"]
+            self.assertIn(f"/artworks/{index}\n", content[0]["data"]["text"])
+            if index % 2:
+                links += 1
+                self.assertEqual(len(content), 1)
+            else:
+                images += 1
+                self.assertEqual(
+                    base64.b64decode(
+                        content[1]["data"]["file"].removeprefix("base64://")
+                    ),
+                    self.image.read_bytes(),
+                )
+        self.assertEqual((images, links), (6, 6))
+
+    async def test_one_large_original_stays_intact_in_its_own_batch(self):
+        large = self.folder / "large.png"
+        large.write_bytes(self.image.read_bytes() + b"\0" * 5000)
+        self.host._download.side_effect = [self.image, large, self.image]
+        with patch.object(browse, "_FORWARD_BATCH_BYTES", 4096):
+            result = must(
+                await self.host._render_items(
+                    [item("1"), item("2"), item("3")], self.umo, bot_id="123"
+                )
+            )
+        self.assertEqual(len(result.chain), 3)
+        for batch in result.chain:
+            assert isinstance(batch, Nodes)
+            self.assertEqual(len(batch.nodes), 1)
+        self.assertEqual(large.stat().st_size, self.image.stat().st_size + 5000)
+
     async def test_r18_source_links_count_toward_forwarding_without_downloads(self):
         cases = (
             ("one link", [item(restriction=1)], 1, 0),
@@ -183,7 +304,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         )
         for label, works, count, downloads in cases:
             with self.subTest(label):
-                host = BrowseHost()
+                host = BrowseHost(self.image)
                 host._content_policy.return_value = (False, "link")
                 result = await host._render_items(works, self.umo)
                 if count == 1:
@@ -228,7 +349,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
     async def test_rankings_and_daily_push_show_all_pages_with_work_count_limit(self):
         for command in ("#pixiv日榜", "#pixiv周榜", "#pixiv月榜", "scheduled"):
             with self.subTest(command=command):
-                host = BrowseHost()
+                host = BrowseHost(self.image)
                 host._browse_candidates = AsyncMock(
                     return_value=[("7", 9), ("8", 20), ("9", 21)]
                 )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase
@@ -18,6 +19,10 @@ from astrbot.api.platform import MessageType
 
 class PixivForwardTests(IsolatedAsyncioTestCase):
     def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.image = Path(temporary.name) / "fixture.png"
+        self.image.write_bytes(b"fixture")
         self.lookup = Mock()
         plugin: Any = SimpleNamespace(
             global_enabled=True,
@@ -57,7 +62,7 @@ class PixivForwardTests(IsolatedAsyncioTestCase):
         self.module._fetch_pages = AsyncMock(
             side_effect=lambda item: [item] * item["page_count"]
         )
-        self.module._download = AsyncMock(return_value=Path("/tmp/pixiv-fixture.png"))
+        self.module._download = AsyncMock(return_value=self.image)
         for command, sender, count in (
             ("#pixiv日榜", "111", 33),
             ("#日榜", "222", 33),
@@ -127,7 +132,7 @@ class PixivForwardTests(IsolatedAsyncioTestCase):
             }
         )
         self.module._fetch_pages = AsyncMock(side_effect=lambda item: [item, item])
-        self.module._download = AsyncMock(return_value=Path("/tmp/pixiv-fixture.png"))
+        self.module._download = AsyncMock(return_value=self.image)
         await self.module.push_daily_ranking()
         self.assertEqual(send.await_count, 2)
         for call, origin, sender in zip(

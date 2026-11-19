@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import re
 from collections.abc import Callable, Sequence
@@ -10,12 +11,19 @@ from typing import Any
 from urllib.parse import quote
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import Image, Node, Nodes, Plain
+from astrbot.api.message_components import (
+    BaseMessageComponent,
+    Image,
+    Node,
+    Nodes,
+    Plain,
+)
 from astrbot.api.platform import MessageType
 
 from .common import fetch_json
 
 _COMMANDS = ("pixiv日榜", "pixiv周榜", "pixiv月榜", "pixiv随机", "pixiv作品")
+_FORWARD_BATCH_BYTES = 16 * 1024 * 1024
 _USAGE = (
     "用法：#pixiv日榜 / #pixiv周榜 / #pixiv月榜（不带参数）；"
     "#pixiv随机 [标签/关键词]；#pixiv作品 ID或Pixiv作品链接 [第N张]"
@@ -337,6 +345,7 @@ class PixivBrowseMixin:
 
         ensure_active()
         entries = []
+        entry_sizes: list[int] = []
         filter_r18, display = self._content_policy(umo)
         self.log.info("[juhkff] Pixiv preparing artwork pages: works=%s", len(items))
         for item in items:
@@ -373,6 +382,7 @@ class PixivBrowseMixin:
                             "Pixiv restricted page omitted its original URL"
                         )
                     content = [Plain(caption + source["original"] + "\n")]
+                    entry_size = len(json.dumps(content[0].text)) + 512
                 else:
                     options: dict[str, Any] = (
                         {"source_only": True} if restricted else {}
@@ -386,7 +396,15 @@ class PixivBrowseMixin:
                     if image is None:
                         raise RuntimeError("Pixiv artwork page download failed")
                     content = [Plain(caption), Image.fromFileSystem(str(image))]
+                    # OneBot expands local images to base64 inside each request.
+                    # Account for that expansion and escaped text before grouping.
+                    entry_size = (
+                        4 * ((image.stat().st_size + 2) // 3)
+                        + len(json.dumps(caption))
+                        + 512
+                    )
                 entries.append(content)
+                entry_sizes.append(entry_size)
         ensure_active()
         if not entries:
             return None
@@ -401,13 +419,26 @@ class PixivBrowseMixin:
         ensure_active()
         if self._content_policy(umo) != (filter_r18, display):
             raise RuntimeError("Pixiv content policy changed during rendering")
-        return MessageChain(
-            [
-                Nodes(
-                    [Node(name="Pixiv", uin=bot_id, content=entry) for entry in entries]
-                )
-            ]
+        batches: list[BaseMessageComponent] = []
+        nodes: list[Node] = []
+        batch_size = 1024
+        for entry, size in zip(entries, entry_sizes):
+            if nodes and batch_size + size > _FORWARD_BATCH_BYTES:
+                batches.append(Nodes(nodes))
+                nodes = []
+                batch_size = 1024
+            nodes.append(Node(name="Pixiv", uin=bot_id, content=entry))
+            batch_size += size
+        if nodes:
+            batches.append(Nodes(nodes))
+        self.log.info(
+            "[juhkff] Pixiv forward batches ready: batches=%s, items=%s, "
+            "estimated_bytes=%s",
+            len(batches),
+            len(entries),
+            sum(entry_sizes) + 1024 * len(batches),
         )
+        return MessageChain(batches)
 
     async def start_browse(self) -> None:
         """Register the independent daily ranking task when configured."""
