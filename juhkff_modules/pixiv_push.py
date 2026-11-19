@@ -48,6 +48,7 @@ MIRROR = "https://i.pixiv.re"
 _API_HOSTS = {"www.pixiv.net"}
 _IMAGE_HOSTS = {"i.pximg.net", "i.pixiv.re"}
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
+_LOGIN_INFO_TIMEOUT = 10.0
 
 _BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -925,7 +926,7 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         return None
 
     async def _get_bot_id(self, umo: str) -> str:
-        """Resolve and cache the sender's account ID through the platform client.
+        """Read the connected sender before a bounded login-info fallback.
 
         Args:
             umo: Fully qualified group origin.
@@ -934,24 +935,42 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
             The platform client's positive numeric account ID.
 
         Raises:
-            RuntimeError: The platform or login information is unavailable.
+            RuntimeError: The connection is unavailable or ambiguous, or the
+                fallback login information is unavailable or timed out.
         """
         platform_id = umo.split(":", 1)[0]
-        if platform_id in self._bot_ids:
-            return self._bot_ids[platform_id]
         platform = self.plugin.context.get_platform_inst(platform_id)
         if platform is None:
             raise RuntimeError("Pixiv forward platform is unavailable")
         client = platform.get_client()
+        # aiocqhttp records X-Self-ID when the reverse WebSocket connects.
+        # Read live state so schedules work before any group message and after
+        # reconnecting with another account. Avoid CQHttp's dynamic API lookup.
+        connections = inspect.getattr_static(client, "_wsr_api_clients", None)
+        if isinstance(connections, dict):
+            if not connections:
+                raise RuntimeError("Pixiv forward platform has no connected bot")
+            if len(connections) != 1:
+                raise RuntimeError(
+                    "Pixiv merged forwarding requires one bot connection per adapter"
+                )
+            bot_id = _positive_id(next(iter(connections)))
+            if bot_id is not None:
+                return bot_id
+        if platform_id in self._bot_ids:
+            return self._bot_ids[platform_id]
         # CQHttp resolves unknown attributes into API calls: client.self_id is
-        # not an account field. Use the read-only OneBot login-info action.
+        # not an account field. Wildcard connections still need login info.
         action = getattr(client, "call_action", None)
         if not callable(action):
             raise RuntimeError("Pixiv merged forwarding requires a OneBot client")
         pending = action("get_login_info")
         if not inspect.isawaitable(pending):
             raise RuntimeError("Pixiv forward login action must be asynchronous")
-        info = await pending
+        try:
+            info = await asyncio.wait_for(pending, timeout=_LOGIN_INFO_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Pixiv forward login information timed out") from exc
         bot_id = _positive_id(info.get("user_id")) if isinstance(info, dict) else None
         if bot_id is None:
             raise RuntimeError("Pixiv forward sender ID is unavailable")

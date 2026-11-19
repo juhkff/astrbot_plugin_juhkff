@@ -9,11 +9,11 @@ from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, Mock, patch
 
+from juhkff_modules import pixiv_browse as browse
+
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Nodes, Plain
 from astrbot.api.platform import MessageType
-
-from juhkff_modules import pixiv_browse as browse
 
 
 class BrowseHost(browse.PixivBrowseMixin):
@@ -61,13 +61,13 @@ def event(text, group=True, wake=True) -> AstrMessageEvent:
             message_str=text,
             is_at_or_wake_command=wake,
             unified_msg_origin="test:GroupMessage:1",
+            get_self_id=lambda: "123",
             get_message_type=lambda: (
                 MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
             ),
             plain_result=lambda text: MessageChain([Plain(text)]),
         ),
     )
-
 
 
 def at(chain: MessageChain | None, index: int = 0) -> Any:
@@ -123,12 +123,16 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 e = event(prefix + command, wake=False)
                 await self.host.handle_browse(e)
                 self.host._browse_selection.assert_awaited_with(
-                    e.unified_msg_origin, mode=mode
+                    e.unified_msg_origin, mode=mode, bot_id="123"
                 )
                 self.assertEqual(e.message_str, prefix + command)
             await self.host.handle_browse(event(prefix + "随机 初音ミク", wake=False))
             self.host._browse_selection.assert_awaited_with(
-                self.umo, mode="daily", keyword="初音ミク", randomized=True
+                self.umo,
+                mode="daily",
+                keyword="初音ミク",
+                randomized=True,
+                bot_id="123",
             )
             await self.host.handle_browse(event(prefix + "作品 7 第1张", wake=False))
             self.assertEqual(
@@ -295,9 +299,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         ):
             result = await self.host.handle_browse(event("#pixiv随机 风景/天空"))
         shuffle.assert_called_once()
-        self.assertIn(
-            "%E9%A3%8E%E6%99%AF%2F%E5%A4%A9%E7%A9%BA", awaited(fetch).args[0]
-        )
+        self.assertIn("%E9%A3%8E%E6%99%AF%2F%E5%A4%A9%E7%A9%BA", awaited(fetch).args[0])
         self.assertEqual(awaited(fetch).kwargs["params"]["s_mode"], "s_tc")
         self.assertEqual(awaited(fetch).kwargs["params"]["order"], "date_d")
         self.assertEqual(awaited(fetch).kwargs["params"]["mode"], "all")

@@ -102,14 +102,21 @@ class PixivBrowseMixin:
             return event.plain_result("Pixiv 功能已停用。")
         text = self._command_text(event)
         origin = event.unified_msg_origin
+        bot_id: str | None = event.get_self_id().lstrip("0")
+        if not re.fullmatch(r"[1-9][0-9]*", bot_id):
+            bot_id = None
         try:
             if text in _COMMANDS[:3]:
                 mode = dict(zip(_COMMANDS[:3], ("daily", "weekly", "monthly")))[text]
-                result = await self._browse_selection(origin, mode=mode)
+                result = await self._browse_selection(origin, mode=mode, bot_id=bot_id)
             elif re.fullmatch(r"pixiv随机(?:\s+.*)?", text):
                 keyword = text[len("pixiv随机") :].strip()
                 result = await self._browse_selection(
-                    origin, mode="daily", keyword=keyword, randomized=True
+                    origin,
+                    mode="daily",
+                    keyword=keyword,
+                    randomized=True,
+                    bot_id=bot_id,
                 )
             elif text.startswith("pixiv作品"):
                 match = re.fullmatch(
@@ -131,7 +138,7 @@ class PixivBrowseMixin:
                     )
                 if page is not None:
                     item = {**item, "_browse_page": page}
-                result = await self._render_items([item], origin)
+                result = await self._render_items([item], origin, bot_id=bot_id)
             else:
                 return event.plain_result(_USAGE)
             if self._stopped or not self.enabled:
@@ -219,7 +226,13 @@ class PixivBrowseMixin:
         return candidates
 
     async def _browse_selection(
-        self, origin: str, *, mode: str, keyword: str = "", randomized: bool = False
+        self,
+        origin: str,
+        *,
+        mode: str,
+        keyword: str = "",
+        randomized: bool = False,
+        bot_id: str | None = None,
     ) -> MessageChain | None:
         """Select usable works, replenishing filtered or failed candidates.
 
@@ -228,6 +241,7 @@ class PixivBrowseMixin:
             mode: Official ranking mode.
             keyword: Optional search query.
             randomized: Whether to shuffle a multi-page candidate pool.
+            bot_id: Sender account from the incoming event, when available.
 
         Returns:
             A chain containing the requested number of usable works if available.
@@ -285,6 +299,7 @@ class PixivBrowseMixin:
             selected,
             origin,
             ranks=None if randomized else ranks,
+            bot_id=bot_id,
         )
 
     async def _render_items(
@@ -294,6 +309,7 @@ class PixivBrowseMixin:
         *,
         ranks: dict[str, int] | None = None,
         delivery_active: Callable[[], bool] | None = None,
+        bot_id: str | None = None,
     ) -> MessageChain | None:
         """Render filtered pages, counting image links toward merged forwarding.
 
@@ -302,6 +318,7 @@ class PixivBrowseMixin:
             umo: Fully qualified destination group.
             ranks: Artwork IDs mapped to their original ranking positions.
             delivery_active: Optional subscription identity and membership guard.
+            bot_id: Known sender account, avoiding an extra OneBot API request.
 
         Returns:
             A direct or merged message, or None if every work was filtered.
@@ -378,8 +395,9 @@ class PixivBrowseMixin:
         self.log.info("[juhkff] Pixiv pages ready: items=%s", len(entries))
         if len(entries) < 2:
             return MessageChain([component for entry in entries for component in entry])
-        self.log.info("[juhkff] Pixiv resolving account for merged forwarding")
-        bot_id = await self._get_bot_id(umo)
+        if bot_id is None:
+            self.log.info("[juhkff] Pixiv resolving account for merged forwarding")
+            bot_id = await self._get_bot_id(umo)
         ensure_active()
         if self._content_policy(umo) != (filter_r18, display):
             raise RuntimeError("Pixiv content policy changed during rendering")
