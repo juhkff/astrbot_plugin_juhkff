@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, DEFAULT, patch
 
@@ -25,10 +26,18 @@ class ExampleModule(common.BaseModule):
 
 
 def make_module(print_log=True):
-    return ExampleModule(SimpleNamespace(config={
-        "global": {"enabled": True, "debug": False},
-        "group_chat": {"enable": True, "print_log": print_log},
-    }, global_enabled=True))
+    return ExampleModule(
+        cast(
+            Any,
+            SimpleNamespace(
+                config={
+                    "global": {"enabled": True, "debug": False},
+                    "group_chat": {"enable": True, "print_log": print_log},
+                },
+                global_enabled=True,
+            ),
+        )
+    )
 
 
 class ModuleLoggingTests(IsolatedAsyncioTestCase):
@@ -162,7 +171,7 @@ class ModuleLoggingTests(IsolatedAsyncioTestCase):
 
         cron = SimpleNamespace(add_basic_job=AsyncMock(side_effect=add_job),
                                delete_job=AsyncMock(side_effect=RuntimeError("delete failed")))
-        scheduler = common.Scheduler(SimpleNamespace(cron_manager=cron))
+        scheduler = common.Scheduler(cast(Any, SimpleNamespace(cron_manager=cron)))
         noisy, quiet = make_module(), make_module(False)
 
         async def callback():
@@ -196,7 +205,7 @@ class ModuleLoggingTests(IsolatedAsyncioTestCase):
 
     async def test_scheduler_registration_failure_respects_owner_switch(self):
         cron = SimpleNamespace(add_basic_job=AsyncMock(side_effect=RuntimeError("registration failed")))
-        scheduler = common.Scheduler(SimpleNamespace(cron_manager=cron))
+        scheduler = common.Scheduler(cast(Any, SimpleNamespace(cron_manager=cron)))
         for enabled in (False, True):
             owner = make_module(enabled)
             with owner.log.scope():

@@ -7,6 +7,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
@@ -34,12 +35,14 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
         self.shared["provider_settings"]["enable"] = False
         self.shared["provider_settings"]["wake_prefix"] = "global-gate"
         self.before = deepcopy(self.shared)
-        self.snapshot = AstrBotConfigSnapshot(self.shared, {})
+        self.snapshot = AstrBotConfigSnapshot(cast(Any, self.shared), {})
         self.acm = SimpleNamespace(get_conf=lambda umo: self.snapshot)
         self.plugin.context.astrbot_config_mgr = self.acm
         self.plugin.context.get_config = lambda **kwargs: self.snapshot
         self.pipeline = PipelineContext(
-            self.shared, SimpleNamespace(context=self.plugin.context), "offline"
+            cast(Any, self.shared),
+            cast(Any, SimpleNamespace(context=self.plugin.context)),
+            "offline",
         )
         self.scope = MessageConfig(
             umo=self.event.unified_msg_origin,
@@ -107,12 +110,12 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
             self.framework["agent"]["config"]["model"]["fallback_provider_ids"],
             ["vision-backup"],
         )
-        self.assertEqual(AstrBotConfigSnapshot(self.shared, {}), self.before)
+        self.assertEqual(AstrBotConfigSnapshot(cast(Any, self.shared), {}), self.before)
 
     async def test_native_provider_and_persona_resolve_plugin_selections(self):
         self.assertTrue(self.module._apply_framework_config(self.event))
         provider = SimpleNamespace(provider_config={"id": "plugin-model"})
-        manager = ProviderManager.__new__(ProviderManager)
+        manager = cast(Any, ProviderManager.__new__(ProviderManager))
         manager.acm = self.acm
         manager.inst_map = {"plugin-model": provider}
         manager.provider_insts = [
@@ -122,7 +125,7 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
             ProviderType.CHAT_COMPLETION, self.event.unified_msg_origin
         )
         self.assertIs(selected, provider)
-        personas = PersonaManager.__new__(PersonaManager)
+        personas = cast(Any, PersonaManager.__new__(PersonaManager))
         personas.acm = self.acm
         persona = {"name": "plugin-persona", "prompt": "Configured persona"}
         personas.personas_v3 = [persona]
@@ -141,9 +144,11 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
         req = fixtures.ProviderRequest(prompt="latest", system_prompt="User persona")
         built = MainAgentBuildConfig.from_config(self.snapshot)
         apply_web_search(req, self.plugin.context, built.provider_settings, self.event)
+        assert req.func_tool is not None
         names = [tool.name for tool in req.func_tool.tools]
         self.assertIn("web_search_tavily", names)
         await self.module.decorate(self.event, req)
+        assert req.func_tool is not None
         self.assertEqual([tool.name for tool in req.func_tool.tools], names)
         self.assertEqual(req.system_prompt, "User persona")
         disabled = fixtures.ProviderRequest(prompt="latest")
@@ -192,7 +197,7 @@ class FrameworkConfigTests(IsolatedAsyncioTestCase):
             "realtime_segmenting"
         )
         self.module.cfg["probability"] = 1
-        self.pipeline.agent_runtimes["astrbot"] = object()
+        self.pipeline.agent_runtimes["astrbot"] = cast(Any, object())
         routing = routing_checks.GroupChatRoutingTests()
         routing.__dict__.update(self.fixture.__dict__)
         routing.core_config = self.snapshot

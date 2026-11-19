@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import test_group_chat as scaffolding
@@ -27,7 +28,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
 
     def setUp(self):
         super().setUp()
-        self.snapshot = AstrBotConfigSnapshot(self.core_config, {})
+        self.snapshot = AstrBotConfigSnapshot(cast(Any, self.core_config), {})
         self.plugin.context.get_config = lambda **kwargs: self.snapshot
         self.plugin.context.get_using_provider_async = AsyncMock(
             return_value=SimpleNamespace(provider_config={"id": "offline-vision"})
@@ -46,7 +47,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                 {"new_callable": AsyncMock, "return_value": None},
             ),
         ):
-            patcher = patch.object(group_chat, target, **kwargs)
+            patcher = patch.object(group_chat, target, **cast(Any, kwargs))
             patcher.start()
             self.addCleanup(patcher.stop)
         patcher = patch(
@@ -58,7 +59,9 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
     def event(self, *args, **kwargs):
         event = super().event(*args, **kwargs)
         token = current_message_config.set(
-            MessageConfig(event.unified_msg_origin, self.snapshot, None, frozenset())
+            MessageConfig(
+                event.unified_msg_origin, self.snapshot, cast(Any, None), frozenset()
+            )
         )
         self.addCleanup(current_message_config.reset, token)
         return event
@@ -100,7 +103,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
 
     async def caption(self, event, req, *args, **kwargs):
         self.assertEqual(req.image_urls, event.get_extra("juhkff_group_current_images"))
-        self.before_caption = deepcopy(self.module.store.records)
+        self.before_caption = deepcopy(self.memory().records)
         refs = set(req.image_urls)
         req.image_urls = []
         req.extra_user_content_parts.append(TextPart(text="CURRENT_CAPTION_TOKEN"))
@@ -116,7 +119,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         record["caption"] = caption
         record["image_analysis"] = event.get_extra("juhkff_group_image_analysis")
         row[2] = json.dumps(record, ensure_ascii=False)
-        actual = deepcopy(self.module.store.records)
+        actual = deepcopy(self.memory().records)
         # JSON whitespace is not part of the persisted record contract.
         for records in (expected, actual):
             for entries in records.values():
@@ -137,7 +140,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         ) as caption:
             await self.module.prepare(event)
         caption.assert_not_awaited()
-        rows = self.module.store.records[event.unified_msg_origin]
+        rows = self.memory().records[event.unified_msg_origin]
         self.assertIsInstance(rows[0][2], str)
         self.assertIn("plain legacy", rows[0][2])
         self.assertEqual(json.loads(rows[0][2])["role"], "user")
@@ -176,7 +179,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                     event.get_extra("juhkff_group_current_images"), [expected]
                 )
                 record = json.loads(
-                    self.module.store.records[event.unified_msg_origin][-1][2]
+                    self.memory().records[event.unified_msg_origin][-1][2]
                 )
                 self.assertEqual(record["images"], [expected])
 
@@ -270,7 +273,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         self.assertIn("引用图片", text)
         self.assertEqual(self.image_refs(request), ["base64://AAAA"])
         self.assertEqual(request.image_urls, [])
-        self.assertNotIn("original-author", request.prompt)
+        self.assertNotIn("original-author", request.prompt or "")
 
     async def test_caption_ignores_history_images_and_switch_restores_originals(self):
         history = self.event(
@@ -304,12 +307,12 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         self.assertIn("history-sender", self.text(req))
         self.assertEqual(self.text(req).count("CURRENT_CAPTION_TOKEN"), 1)
         self.assert_caption_saved(before, current)
-        saved = deepcopy(self.module.store.records)
+        saved = deepcopy(self.memory().records)
         self.module.cfg["image_mode"] = "original"
         restored = ProviderRequest(prompt="now")
         await self.module.decorate(current, restored)
         self.assertEqual(self.image_refs(restored), ["base64://AAAA", "base64://BBBB"])
-        self.assertEqual(self.module.store.records, saved)
+        self.assertEqual(self.memory().records, saved)
 
     async def test_redis_failure_retains_current_multiple_images(self):
         event = self.event(
@@ -333,7 +336,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         await self.module.decorate(event, req)
         self.assertEqual(len(req.image_urls), 2)
         self.assertFalse(event.get_extra("juhkff_group_context"))
-        self.assertFalse(self.module.store.records)
+        self.assertFalse(self.memory().records)
 
     async def test_current_and_reply_multiple_images_are_retained_without_duplicates(
         self,
@@ -354,9 +357,9 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         )
         original = deepcopy(self.core_config)
         event = self.event(addressed=True, components=[self.image()])
-        snapshot = AstrBotConfigSnapshot(self.core_config, {})
+        snapshot = AstrBotConfigSnapshot(cast(Any, self.core_config), {})
         self.plugin.context.get_config = lambda **kwargs: snapshot
-        scope = MessageConfig(event.unified_msg_origin, snapshot, None, frozenset())
+        scope = MessageConfig(event.unified_msg_origin, snapshot, cast(Any, None), frozenset())
         token = current_message_config.set(scope)
         try:
             await self.module.prepare(event)
@@ -389,7 +392,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
             prepared["raw"] = {"path": req.image_urls[0], "montage": True}
 
         async def caption(owner, req, settings, context, provider_id, *, montage_refs):
-            self.before_caption = deepcopy(self.module.store.records)
+            self.before_caption = deepcopy(self.memory().records)
             order.append("caption")
             self.assertEqual(req.image_urls, ["/offline/prepared-montage.png"])
             self.assertEqual(montage_refs, {"/offline/prepared-montage.png"})
@@ -456,7 +459,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         await self.module.prepare(prior)
         current = self.event("question", addressed=True)
         await self.module.prepare(current)
-        before = deepcopy(self.module.store.records)
+        before = deepcopy(self.memory().records)
         req = ProviderRequest(prompt="question")
         with TemporaryDirectory() as directory:
 
@@ -478,7 +481,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
             images[0]["image_url"]["url"].startswith("data:image/png;base64,")
         )
         self.assertEqual(req.extra_user_content_parts, [])
-        self.assertEqual(self.module.store.records, before)
+        self.assertEqual(self.memory().records, before)
 
     async def test_later_consumed_events_keep_inbound_caption_without_snapshot_override(
         self,
@@ -580,7 +583,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         for matching, active in ((False, True), (True, False)):
             with self.subTest(matching=matching, active=active):
                 event = self.event(addressed=True, components=[self.image()])
-                snapshot = AstrBotConfigSnapshot(self.core_config, {})
+                snapshot = AstrBotConfigSnapshot(cast(Any, self.core_config), {})
                 snapshot["provider_settings"]["default_image_caption_provider_id"] = (
                     "keep"
                 )
@@ -588,7 +591,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                 scope = MessageConfig(
                     event.unified_msg_origin if matching else "other-group",
                     snapshot,
-                    None,
+                    cast(Any, None),
                     frozenset(),
                     active,
                 )
@@ -611,7 +614,10 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         self.plugin.context.get_config = lambda **kwargs: self.core_config
         event = self.event(addressed=True, components=[self.image()])
         scope = MessageConfig(
-            event.unified_msg_origin, self.core_config, None, frozenset()
+            event.unified_msg_origin,
+            cast(Any, self.core_config),
+            cast(Any, None),
+            frozenset(),
         )
         token = current_message_config.set(scope)
         try:
@@ -663,7 +669,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         self.assertFalse(request.image_urls)
         self.assertFalse(self.image_refs(request))
 
-        saved = deepcopy(self.module.store.records)
+        saved = deepcopy(self.memory().records)
         self.module.cfg["image_mode"] = "original"
         original_request = ProviderRequest(prompt=follow_up.message_str)
         await self.module.decorate(follow_up, original_request)
@@ -671,14 +677,14 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
             self.image_refs(original_request), ["base64://AAAA", "base64://BBBB"]
         )
         self.assertNotIn("CURRENT_CAPTION_TOKEN", self.text(original_request))
-        self.assertEqual(self.module.store.records, saved)
+        self.assertEqual(self.memory().records, saved)
 
     async def test_failed_caption_does_not_persist_failure_as_history(self):
         self.module.cfg["image_mode"] = "caption"
         event = self.event("question", addressed=True, components=[self.image()])
 
         async def fail_caption(owner, req, *args, **kwargs):
-            self.before_caption = deepcopy(self.module.store.records)
+            self.before_caption = deepcopy(self.memory().records)
             req.image_urls = []
             req.extra_user_content_parts.append(
                 TextPart(text="[Image Captioning Failed]")
@@ -690,8 +696,8 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         ):
             await self.module.prepare(event)
             await self.module.admit(event)
-        self.assertEqual(self.module.store.records, self.before_caption)
-        record = json.loads(self.module.store.records[event.unified_msg_origin][-1][2])
+        self.assertEqual(self.memory().records, self.before_caption)
+        record = json.loads(self.memory().records[event.unified_msg_origin][-1][2])
         self.assertNotIn("caption", record)
         self.assertNotIn("image_analysis", record)
         request = ProviderRequest(prompt="question")
@@ -724,8 +730,8 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                     if "caption" not in json.loads(record):
                         return await original_replace(umo, record_id, record)
                     if deleted:
-                        self.module.store.records[umo].clear()
-                    before = deepcopy(self.module.store.records)
+                        self.memory().records[umo].clear()
+                    before = deepcopy(self.memory().records)
                     if isinstance(failure, Exception):
                         raise failure
                     return False
@@ -758,7 +764,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                     json.loads(update.call_args.args[2])["caption"],
                     "CURRENT_CAPTION_TOKEN",
                 )
-                self.assertEqual(self.module.store.records, before)
+                self.assertEqual(self.memory().records, before)
                 request = ProviderRequest(prompt="question")
                 await self.module.decorate(event, request)
                 self.assertIn("CURRENT_CAPTION_TOKEN", self.text(request))
@@ -804,7 +810,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                     self.assertFalse(event.is_at_or_wake_command)
                     self.assertFalse(event.get_extra("juhkff_group_image_analysis"))
                     record = json.loads(
-                        self.module.store.records[event.unified_msg_origin][-1][2]
+                        self.memory().records[event.unified_msg_origin][-1][2]
                     )
                     self.assertEqual(record["caption"], raw)
                     self.assertEqual(record["images"], ["base64://AAAA"])
@@ -854,7 +860,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         describe.assert_not_awaited()
         self.assertEqual(request.image_urls, ["base64://aGVsbG8="])
         self.assertIsNone(event.get_extra("juhkff_group_image_analysis"))
-        record = json.loads(self.module.store.records[event.unified_msg_origin][-1][2])
+        record = json.loads(self.memory().records[event.unified_msg_origin][-1][2])
         self.assertNotIn("caption", record)
         self.assertNotIn("image_analysis", record)
 
@@ -880,7 +886,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         original_settings = deepcopy(self.snapshot["provider_settings"])
 
         async def caption(owner, req, settings, *args, **kwargs):
-            self.before_caption = deepcopy(self.module.store.records)
+            self.before_caption = deepcopy(self.memory().records)
             self.assertIn('"is_meme"', settings["image_caption_prompt"])
             self.assertIn("按输入顺序", settings["image_caption_prompt"])
             refs = set(req.image_urls)
@@ -941,7 +947,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
                 )
 
                 async def caption(owner, req, *args, **kwargs):
-                    self.before_caption = deepcopy(self.module.store.records)
+                    self.before_caption = deepcopy(self.memory().records)
                     req.extra_user_content_parts.append(
                         TextPart(text="<image_caption>" + raw + "</image_caption>")
                     )
@@ -968,7 +974,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
         event = self.event(components=[self.image()])
 
         async def caption(owner, req, *args, **kwargs):
-            self.before_caption = deepcopy(self.module.store.records)
+            self.before_caption = deepcopy(self.memory().records)
             req.extra_user_content_parts.append(
                 TextPart(
                     text='```json\n{"images":[{"is_meme":null,"description":"  unclear image  "}]}\n```'
@@ -1050,7 +1056,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
             await self.module.prepare(event)
         await self.module.admit(event)
         self.assertTrue(event.is_at_or_wake_command)
-        record = json.loads(self.module.store.records[event.unified_msg_origin][-1][2])
+        record = json.loads(self.memory().records[event.unified_msg_origin][-1][2])
         self.assertEqual(record["images"], ["base64://aGVsbG8="])
         self.assertNotIn("caption", record)
         req = ProviderRequest(prompt=event.message_str)
@@ -1073,7 +1079,7 @@ class GroupChatImageTests(scaffolding.GroupChatTests):
             await self.module.prepare(event)
             await self.module.admit(event)
         describe.assert_awaited_once()
-        self.assertFalse(self.module.store.records)
+        self.assertFalse(self.memory().records)
         req = ProviderRequest(prompt="question")
         await self.module.decorate(event, req)
         self.assertIn("CURRENT_CAPTION_TOKEN", self.text(req))

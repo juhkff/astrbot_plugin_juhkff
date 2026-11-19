@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import random
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Any
 from urllib.parse import quote
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -32,14 +33,27 @@ def _bounded(value: object, default: int, maximum: int) -> int:
     Returns:
         An integer between one and maximum.
     """
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return default
     try:
         return max(1, min(maximum, int(value)))
-    except (TypeError, ValueError, OverflowError):
+    except (ValueError, OverflowError):
         return default
 
 
 class PixivBrowseMixin:
     """Add browsing to a host implementing Pixiv detail, pages, and download APIs."""
+
+    def __getattr__(self, name: str) -> Any:
+        """Read host state implemented by the Pixiv subscription module.
+
+        Args:
+            name: Attribute provided by the host class.
+
+        Raises:
+            AttributeError: The host did not provide this attribute.
+        """
+        raise AttributeError(name)
 
     def _command_text(self, event: AstrMessageEvent) -> str:
         """Normalize optional Pixiv aliases without modifying the incoming event.
@@ -233,7 +247,15 @@ class PixivBrowseMixin:
         )
         if not randomized:
             pages = 1
+        self.log.info(
+            "[juhkff] Pixiv browse fetching: mode=%s, search=%s, pages=%s, count=%s",
+            mode,
+            bool(keyword),
+            pages,
+            count,
+        )
         candidates = await self._browse_candidates(mode, pages, keyword)
+        self.log.info("[juhkff] Pixiv browse candidates ready: %s", len(candidates))
         if randomized:
             random.shuffle(candidates)
         selected = []
@@ -267,7 +289,7 @@ class PixivBrowseMixin:
 
     async def _render_items(
         self,
-        items: list[dict],
+        items: Sequence[Any],
         umo: str,
         *,
         ranks: dict[str, int] | None = None,
@@ -299,6 +321,7 @@ class PixivBrowseMixin:
         ensure_active()
         entries = []
         filter_r18, display = self._content_policy(umo)
+        self.log.info("[juhkff] Pixiv preparing artwork pages: works=%s", len(items))
         for item in items:
             restriction = item.get("x_restrict", -1)
             restricted = restriction != 0
@@ -313,6 +336,12 @@ class PixivBrowseMixin:
             )
             for index in indices:
                 ensure_active()
+                self.log.info(
+                    "[juhkff] Pixiv preparing page: artwork=%s, page=%s/%s",
+                    item["id"],
+                    index + 1,
+                    item["page_count"],
+                )
                 source = pages[index]
                 rank = (ranks or {}).get(item["id"])
                 caption = (
@@ -328,7 +357,9 @@ class PixivBrowseMixin:
                         )
                     content = [Plain(caption + source["original"] + "\n")]
                 else:
-                    options = {"source_only": True} if restricted else {}
+                    options: dict[str, Any] = (
+                        {"source_only": True} if restricted else {}
+                    )
                     if delivery_active is not None:
                         options["delivery_active"] = delivery_active
                     image = await self._download(
@@ -344,8 +375,10 @@ class PixivBrowseMixin:
             return None
         if self._content_policy(umo) != (filter_r18, display):
             raise RuntimeError("Pixiv content policy changed during rendering")
+        self.log.info("[juhkff] Pixiv pages ready: items=%s", len(entries))
         if len(entries) < 2:
             return MessageChain([component for entry in entries for component in entry])
+        self.log.info("[juhkff] Pixiv resolving account for merged forwarding")
         bot_id = await self._get_bot_id(umo)
         ensure_active()
         if self._content_policy(umo) != (filter_r18, display):

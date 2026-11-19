@@ -58,7 +58,10 @@ class RedisGroupChatStore:
             Prior context strings, excluding this arrival.
         """
         key = f"{self.prefix}:messages:{hashlib.sha256(umo.encode()).hexdigest()}"
-        return await self.client.eval(
+        client = self.client
+        if client is None:
+            raise RuntimeError("Redis group context is not connected")
+        return await client.eval(
             """
             local rows = redis.call('LRANGE', KEYS[1], -tonumber(ARGV[4]), -1)
             local result = {}
@@ -87,7 +90,10 @@ class RedisGroupChatStore:
             text: Completed caption and metadata.
         """
         key = f"{self.prefix}:messages:{hashlib.sha256(umo.encode()).hexdigest()}"
-        await self.client.eval(
+        client = self.client
+        if client is None:
+            raise RuntimeError("Redis group context is not connected")
+        await client.eval(
             """
             for i, raw in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
                 local row = cjson.decode(raw)
@@ -112,7 +118,10 @@ class RedisGroupChatStore:
             umo: Official session identity.
         """
         key = f"{self.prefix}:messages:{hashlib.sha256(umo.encode()).hexdigest()}"
-        await self.client.unlink(key)
+        client = self.client
+        if client is None:
+            raise RuntimeError("Redis group context is not connected")
+        await client.unlink(key)
 
     async def close(self):
         """Close the connection without deleting stored records."""

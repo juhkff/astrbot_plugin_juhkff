@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from contextvars import ContextVar
+from typing import Any
 
-from astrbot.core.config.runtime import current_message_config
+from astrbot.api.event import AstrMessageEvent
+from astrbot.core.config.runtime import MessageConfig, current_message_config
 
 from .module_logging import ModuleLogger
 
-_binding = ContextVar("juhkff_group_request_log", default=None)
+_binding: ContextVar[
+    tuple[GroupChatRequestLogger, MessageConfig, AstrMessageEvent] | None
+] = ContextVar("juhkff_group_request_log", default=None)
 
 
 class GroupChatRequestLogger:
@@ -41,7 +46,10 @@ class GroupChatRequestLogger:
         get_providers = getattr(self.module.plugin.context, "get_all_providers", None)
         if not callable(get_providers):
             return
-        for provider in get_providers():
+        providers: Any = get_providers()
+        if isinstance(providers, (str, bytes)) or not isinstance(providers, Iterable):
+            return
+        for provider in providers:
             sdk = getattr(provider, "client", None)
             for client in (
                 getattr(provider, "_http_client", None),
@@ -64,11 +72,15 @@ class GroupChatRequestLogger:
         """
         binding = _binding.get()
         scope = current_message_config.get()
+        if (
+            binding is None
+            or binding[0] is not self
+            or scope is None
+            or binding[1] is not scope
+        ):
+            return
         if not (
-            binding
-            and binding[0] is self
-            and binding[1] is scope
-            and scope.active
+            scope.active
             and self.module.enabled
             and self.module.log_enabled
             and binding[2].get_extra("juhkff_group_owned")

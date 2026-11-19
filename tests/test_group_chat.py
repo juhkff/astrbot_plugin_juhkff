@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 from itertools import count
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, patch
 
@@ -82,7 +83,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
             new_conversation=AsyncMock(return_value=self.conversation.cid),
             get_conversation=AsyncMock(return_value=self.conversation),
         )
-        self.plugin = SimpleNamespace(
+        self.plugin: Any = SimpleNamespace(
             global_enabled=True,
             config={
                 "global": {"debug": False},
@@ -106,6 +107,9 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         self.addCleanup(store_patch.stop)
         self.module = group_chat.GroupChatModule(self.plugin)
         self.plugin.modules[self.module.key] = self.module
+
+    def memory(self) -> MemoryGroupChatStore:
+        return cast(MemoryGroupChatStore, self.module.store)
 
     def event(
         self,
@@ -178,7 +182,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         self.assertIsNone(await self.module.admit(event))
         self.assertFalse(event.get_extra("juhkff_group_owned", False))
         self.assertFalse(event.call_llm)
-        self.assertFalse(self.module.store.records)
+        self.assertFalse(self.memory().records)
         self.manager.get_curr_conversation_id.assert_not_awaited()
 
     async def test_plugin_intercept_prevents_passive_context_and_reply(self):
@@ -188,7 +192,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         event = self.event("#help", addressed=True)
         await self.module.prepare(event)
         self.assertIsNone(await self.module.admit(event))
-        self.assertFalse(self.module.store.records)
+        self.assertFalse(self.memory().records)
         self.assertFalse(event.get_extra("juhkff_group_owned", False))
 
     async def test_bare_self_mention_with_whitespace_binds_existing_conversation(self):
@@ -453,7 +457,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         future = self.event("FUTURE_TOKEN")
         for event in (first, current, future):
             await self.module.prepare(event)
-        before = deepcopy(self.module.store.records[current.unified_msg_origin])
+        before = deepcopy(self.memory().records[current.unified_msg_origin])
         req = ProviderRequest(prompt="CURRENT_TOKEN", conversation=self.conversation)
         original_part = TextPart(text="existing context")
         req.extra_user_content_parts.append(original_part)
@@ -468,7 +472,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         self.assertNotIn("CURRENT_TOKEN", message["content"])
         self.assertNotIn("FUTURE_TOKEN", message["content"])
         self.assertIs(req.conversation, self.conversation)
-        self.assertEqual(before, self.module.store.records[current.unified_msg_origin])
+        self.assertEqual(before, self.memory().records[current.unified_msg_origin])
         second = ProviderRequest(prompt="retry")
         await self.module.decorate(current, second)
         self.assertEqual(second.contexts, req.contexts)
@@ -518,7 +522,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         self.assertIn("OLDER", text)
         self.assertIn("NEWEST", text)
         self.assertNotIn("CURRENT", text)
-        self.assertEqual(len(self.module.store.records[event.unified_msg_origin]), 2)
+        self.assertEqual(len(self.memory().records[event.unified_msg_origin]), 2)
 
     async def test_groups_are_isolated_for_context(self):
         self.module.cfg["probability"] = 1
@@ -552,37 +556,37 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         self.assertIn(
             "RETAINED_TOKEN", "\n".join(item["content"] for item in req.contexts)
         )
-        self.assertEqual(len(self.module.store.records[current.unified_msg_origin]), 2)
+        self.assertEqual(len(self.memory().records[current.unified_msg_origin]), 2)
 
     async def test_reset_clears_only_target_group_after_success(self):
         a, b = self.event(group="a"), self.event(group="b")
         await self.module.prepare(a)
         await self.module.prepare(b)
         await self.module.after_sent(a)
-        self.assertEqual(len(self.module.store.records), 2)
+        self.assertEqual(len(self.memory().records), 2)
         a.set_extra("_clean_group_context_session", True)
         await self.module.after_sent(a)
-        self.assertNotIn(a.unified_msg_origin, self.module.store.records)
-        self.assertIn(b.unified_msg_origin, self.module.store.records)
-        stored = deepcopy(self.module.store.records)
+        self.assertNotIn(a.unified_msg_origin, self.memory().records)
+        self.assertIn(b.unified_msg_origin, self.memory().records)
+        stored = deepcopy(self.memory().records)
         await self.module.stop()
-        self.assertEqual(self.module.store.records, stored)
-        self.assertTrue(self.module.store.closed)
+        self.assertEqual(self.memory().records, stored)
+        self.assertTrue(self.memory().closed)
 
     async def test_generated_reply_is_recorded_only_after_delivery_and_once(self):
         event = self.event("hello", addressed=True)
         await self.module.prepare(event)
-        before = deepcopy(self.module.store.records[event.unified_msg_origin])
+        before = deepcopy(self.memory().records[event.unified_msg_origin])
         await self.module.capture_response(
             event, SimpleNamespace(completion_text="BOT_REPLY_TOKEN")
         )
-        self.assertEqual(self.module.store.records[event.unified_msg_origin], before)
+        self.assertEqual(self.memory().records[event.unified_msg_origin], before)
         await self.module.after_sent(event)
-        rows = deepcopy(self.module.store.records[event.unified_msg_origin])
+        rows = deepcopy(self.memory().records[event.unified_msg_origin])
         self.assertEqual(len(rows), len(before) + 1)
         self.assertIn("BOT_REPLY_TOKEN", rows[-1][2])
         await self.module.after_sent(event)
-        self.assertEqual(self.module.store.records[event.unified_msg_origin], rows)
+        self.assertEqual(self.memory().records[event.unified_msg_origin], rows)
         next_event = self.event("follow up", addressed=True)
         await self.module.prepare(next_event)
         req = ProviderRequest(prompt="follow up")
@@ -611,7 +615,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         req.contexts = [{"role": "user", "content": "STALE_DB"}]
         await self.module.decorate(event, req)
         self.assertEqual(req.contexts, [])
-        self.assertFalse(self.module.store.records)
+        self.assertFalse(self.memory().records)
 
     async def test_native_runner_keeps_roles_and_latest_input_last(self):
         from astrbot.core.agent.runners.tool_loop_agent_runner import (
@@ -635,7 +639,11 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         runner = ToolLoopAgentRunner()
         context = SimpleNamespace()
         await runner.reset(
-            SimpleNamespace(provider_config={"id": "offline"}), req, context, None, None
+            cast(Any, SimpleNamespace(provider_config={"id": "offline"})),
+            req,
+            cast(Any, context),
+            cast(Any, None),
+            cast(Any, None),
         )
         self.assertEqual(
             [m.role for m in context.messages], ["system", "user", "assistant", "user"]
@@ -645,9 +653,9 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         self.assertFalse(context.messages[-1]._no_save)
         self.assertIn("BOB_LATEST", str(context.messages[-1].content))
         self.assertNotIn("BOB_LATEST", str(context.messages[:-1]))
-        self.assertEqual(req.prompt.count("[发言人："), 1)
+        self.assertEqual((req.prompt or "").count("[发言人："), 1)
         await self.module.decorate(current, req)
-        self.assertEqual(req.prompt.count("[发言人："), 1)
+        self.assertEqual((req.prompt or "").count("[发言人："), 1)
 
     async def test_legacy_roles_and_structured_user_cannot_spoof_assistant(self):
         import json
@@ -713,17 +721,21 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         original_list = original.tools
         req = ProviderRequest(prompt="fresh question", func_tool=original)
         await self.module.decorate(event, req)
-        self.assertIsNot(req.func_tool, original)
+        filtered = req.func_tool
+        self.assertIsNot(filtered, original)
+        self.assertIsNotNone(filtered)
+        assert filtered is not None
         self.assertIs(original.tools, original_list)
         self.assertEqual(original.tools, tools)
         self.assertIs(original.get_tool("get_group_message_history"), tools[1])
-        self.assertEqual(req.func_tool.tools, [tools[0], tools[2], tools[3]])
-        for kept in req.func_tool.tools:
+        self.assertEqual(filtered.tools, [tools[0], tools[2], tools[3]])
+        for kept in filtered.tools:
             self.assertIs(kept, original.get_tool(kept.name))
-        self.assertIsNone(req.func_tool.get_tool("get_group_message_history"))
+        self.assertIsNone(filtered.get_tool("get_group_message_history"))
         other_request = ProviderRequest(prompt="another scope", func_tool=original)
         await self.module.decorate(self.event(group="outside"), other_request)
         self.assertIs(other_request.func_tool, original)
+        assert other_request.func_tool is not None
         self.assertIs(
             other_request.func_tool.get_tool("get_group_message_history"), tools[1]
         )
@@ -750,7 +762,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         text = str(req.extra_user_content_parts)
         self.assertNotIn("OTHER_GROUP_SECRET", text)
         self.assertNotIn("STALE_DATABASE_TOKEN", text)
-        self.assertNotIn(event.unified_msg_origin, self.module.store.records)
+        self.assertNotIn(event.unified_msg_origin, self.memory().records)
 
     async def test_disabled_and_out_of_scope_events_are_untouched(self):
         configurations = (
@@ -776,7 +788,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
                 self.assertEqual(len(handlers), 2)
                 self.assertFalse(req.extra_user_content_parts)
                 self.assertFalse(event.call_llm)
-                self.assertFalse(self.module.store.records)
+                self.assertFalse(self.memory().records)
                 self.module.cfg.clear()
                 self.module.cfg.update(old)
         self.assertEqual(self.core_config, self.expected_core_config)
@@ -798,7 +810,7 @@ class GroupChatTests(IsolatedAsyncioTestCase):
         stopped.stop_event()
         await self.module.prepare(stopped)
         self.assertFalse(stopped.get_extra("juhkff_group_owned", False))
-        self.assertFalse(self.module.store.records)
+        self.assertFalse(self.memory().records)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
@@ -56,12 +57,14 @@ class GroupChatConfigLayoutTests(IsolatedAsyncioTestCase):
     def native_scope(self):
         event = self.fixture.event(addressed=True)
         shared = self.fixture.core_config
-        snapshot = AstrBotConfigSnapshot(shared, {})
+        snapshot = AstrBotConfigSnapshot(cast(Any, shared), {})
         acm = SimpleNamespace(get_conf=lambda umo: snapshot)
         self.plugin.context.astrbot_config_mgr = acm
         self.plugin.context.get_config = lambda **kwargs: snapshot
         pipeline = PipelineContext(
-            shared, SimpleNamespace(context=self.plugin.context), "offline"
+            cast(Any, shared),
+            cast(Any, SimpleNamespace(context=self.plugin.context)),
+            "offline",
         )
         scope = MessageConfig(event.unified_msg_origin, snapshot, pipeline, frozenset())
         token = current_message_config.set(scope)
@@ -312,7 +315,7 @@ class GroupChatConfigLayoutTests(IsolatedAsyncioTestCase):
         self.assertNotIn("search", snapshot)
 
         provider = SimpleNamespace(provider_config={"id": "plugin-model"})
-        manager = ProviderManager.__new__(ProviderManager)
+        manager = cast(Any, ProviderManager.__new__(ProviderManager))
         manager.acm = acm
         manager.inst_map = {"plugin-model": provider}
         manager.provider_insts = []
@@ -320,7 +323,7 @@ class GroupChatConfigLayoutTests(IsolatedAsyncioTestCase):
             ProviderType.CHAT_COMPLETION, event.unified_msg_origin
         )
         self.assertIs(selected, provider)
-        personas = PersonaManager.__new__(PersonaManager)
+        personas = cast(Any, PersonaManager.__new__(PersonaManager))
         personas.acm = acm
         persona = {"name": "plugin-persona", "prompt": "Configured persona"}
         personas.personas_v3 = [persona]
@@ -335,6 +338,7 @@ class GroupChatConfigLayoutTests(IsolatedAsyncioTestCase):
         )
         req = fixtures.ProviderRequest(prompt="latest")
         apply_web_search(req, self.plugin.context, built.provider_settings, event)
+        assert req.func_tool is not None
         self.assertIn("web_search_tavily", [tool.name for tool in req.func_tool.tools])
         snapshot["agent"]["config"]["model"]["fallback_provider_ids"].append("local")
         self.assertEqual(dict(config), before_plugin)

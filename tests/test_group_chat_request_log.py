@@ -6,6 +6,7 @@ import asyncio
 import json
 from itertools import count
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
@@ -26,7 +27,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
         self.event = self.events.event(addressed=True)
         self.event.set_extra("juhkff_group_owned", True)
         self.scope = SimpleNamespace(active=True, umo=self.event.unified_msg_origin)
-        token = current_message_config.set(self.scope)
+        token = current_message_config.set(cast(Any, self.scope))
         self.addCleanup(current_message_config.reset, token)
         self.received = []
         self.original_requests = []
@@ -244,7 +245,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
         sdk = AsyncOpenAI(
             api_key="sdk-key-secret",
             base_url="https://offline.invalid/v1",
-            http_client=sdk_http,
+            http_client=cast(Any, sdk_http),
             max_retries=0,
         )
         self.providers[:] = [SimpleNamespace(client=sdk)]
@@ -651,7 +652,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
             SimpleNamespace(active=True, umo="other-group"),
         ):
             with self.subTest(scope=scope):
-                token = current_message_config.set(scope)
+                token = current_message_config.set(cast(Any, scope))
                 try:
                     self.request_logger.bind(self.event)
                     await self.post()
@@ -674,7 +675,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
             SimpleNamespace(active=True, umo=self.scope.umo),
         ):
             with self.subTest(scope=scope):
-                token = current_message_config.set(scope)
+                token = current_message_config.set(cast(Any, scope))
                 try:
                     await self.post()
                     self.info.assert_not_called()
@@ -691,7 +692,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
         async def send(event, marker):
             event.set_extra("juhkff_group_owned", True)
             scope = SimpleNamespace(active=True, umo=event.unified_msg_origin)
-            token = current_message_config.set(scope)
+            token = current_message_config.set(cast(Any, scope))
             try:
                 self.request_logger.bind(event)
                 await asyncio.sleep(0)
@@ -758,7 +759,7 @@ class GroupChatRequestLogTests(IsolatedAsyncioTestCase):
         self.warning.assert_not_called()
 
     async def test_missing_message_id_is_allowed(self):
-        self.event.message_obj.message_id = None
+        cast(Any, self.event.message_obj).message_id = None
         self.request_logger.bind(self.event)
         await self.post()
         entries = self.entries()

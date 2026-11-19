@@ -24,7 +24,7 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
         self.target = self.base / "help"
         self.target.mkdir()
         self.now = 1_000_000.0
-        plugin = SimpleNamespace(
+        self.plugin: Any = SimpleNamespace(
             config={"help": {}},
             version="test",
             modules={
@@ -36,7 +36,7 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
                 )
             },
         )
-        self.module = help_gen.HelpGenModule(cast(Any, plugin))
+        self.module = help_gen.HelpGenModule(self.plugin)
         self.paths = patch.object(help_gen, "data_dir", return_value=self.base)
         self.paths.start()
         self.addCleanup(self.paths.stop)
@@ -48,10 +48,10 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.logs.stop)
 
     def test_help_lists_itself_status_and_only_enabled_modules(self):
-        self.module.plugin.global_enabled = True
-        self.module.plugin.config["help"].update(enable=True, command="菜单")
-        self.module.plugin.modules["help"] = self.module
-        self.module.plugin.modules["disabled"] = SimpleNamespace(
+        self.plugin.global_enabled = True
+        self.plugin.config["help"].update(enable=True, command="菜单")
+        self.plugin.modules["help"] = self.module
+        self.plugin.modules["disabled"] = SimpleNamespace(
             enabled=False, help_entries=lambda: [("#hidden", "hidden")]
         )
         text = self.module._text()
@@ -59,7 +59,7 @@ class HelpGenTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/juhkff", text)
         self.assertIn("#sample", text)
         self.assertNotIn("#hidden", text)
-        self.module.plugin.modules.pop("sample")
+        self.plugin.modules.pop("sample")
         self.assertTrue(self.module._sections())
         self.assertIn("#菜单", self.module._text())
 

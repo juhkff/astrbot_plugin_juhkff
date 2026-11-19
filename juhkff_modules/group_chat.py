@@ -7,13 +7,14 @@ import random
 import re
 import time
 from copy import deepcopy
+from typing import cast
 from uuid import uuid4
 
 from astrbot.api.message_components import At, Image, Plain, Reply
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.builtin_stars.astrbot.group_chat_context import GroupChatContext
-from astrbot.core.agent.message import ImageURLPart, TextPart
+from astrbot.core.agent.message import ContentPart, ImageURLPart, TextPart
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.agent_media import caption_request_images, get_quoted_message_settings
 from astrbot.core.astr_agent_runtime.main_agent.providers import (
@@ -21,6 +22,7 @@ from astrbot.core.astr_agent_runtime.main_agent.providers import (
     select_chat_provider,
     select_image_provider,
 )
+from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.config.runtime import current_message_config
 from astrbot.core.config.snapshot import AstrBotConfigSnapshot
 from astrbot.core.utils.image_input import prepare_request_images
@@ -61,9 +63,13 @@ class GroupChatModule(BaseModule):
             self.cfg.update(migrated)
             # Clearing the wrapper prevents old values overriding future edits.
             self.cfg["framework"] = {}
-            if callable(getattr(plugin.config, "save_config", None)):
-                plugin.config.save_config()
-        self.formatter = GroupChatContext(None, plugin.context)
+            save_config = getattr(plugin.config, "save_config", None)
+            if callable(save_config):
+                save_config()
+        # GroupChatContext stores the manager but formatting never reads it.
+        self.formatter = GroupChatContext(
+            cast(AstrBotConfigManager, None), plugin.context
+        )
         self.store = RedisGroupChatStore(
             self.cfg.get("redis_url", "redis://localhost:6379/0"),
             self.cfg.get("redis_prefix", "astrbot:juhkff:group_chat"),
@@ -689,8 +695,8 @@ class GroupChatModule(BaseModule):
                 # Only old plugin-generated bot records used this exact prefix.
                 role = "assistant"
             content = text
-            if refs and role == "user":
-                parts = [TextPart(text=text)]
+            if refs and role == "user" and record is not None:
+                parts: list[ContentPart] = [TextPart(text=text)]
                 for index, ref in enumerate(refs):
                     source = sources[index] if index < len(sources) else {}
                     if source.get("quoted"):

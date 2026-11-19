@@ -19,6 +19,7 @@ import os
 import sys
 from collections.abc import AsyncGenerator
 from sys import maxsize
+from typing import cast
 
 # 让 `juhkff_modules` 无论被当作包还是普通模块加载都能导入。
 # （AstrBot 加载插件时用 importlib 按文件路径导入 main.py，包名可能不是插件目录名）
@@ -192,6 +193,11 @@ class JuhkffPlugin(Star):
             if not mod.enabled:
                 continue
             with ModuleLogger(mod).scope():
+                if mod.key == "pixiv_push" and exclusive:
+                    logger.info(
+                        "[juhkff] Pixiv command accepted: origin=%s",
+                        event.unified_msg_origin,
+                    )
                 try:
                     chain = await mod.handle(event)
                 except Exception:
@@ -209,7 +215,17 @@ class JuhkffPlugin(Star):
                         return
                     continue
                 try:
+                    if mod.key == "pixiv_push":
+                        logger.info(
+                            "[juhkff] Pixiv reply sending: origin=%s",
+                            event.unified_msg_origin,
+                        )
                     await event.send(chain)
+                    if mod.key == "pixiv_push":
+                        logger.info(
+                            "[juhkff] Pixiv reply sent: origin=%s",
+                            event.unified_msg_origin,
+                        )
                 except Exception:
                     logger.exception(
                         f"[juhkff] Module {mod.key} failed to send a message"
@@ -225,7 +241,7 @@ class JuhkffPlugin(Star):
         Args:
             event: Incoming group event.
         """
-        module = self.modules["group_chat"]
+        module = cast(GroupChatModule, self.modules["group_chat"])
         with ModuleLogger(module).scope():
             await module.prepare(event)
 
@@ -236,7 +252,7 @@ class JuhkffPlugin(Star):
         Args:
             event: Incoming group event.
         """
-        module = self.modules["group_chat"]
+        module = cast(GroupChatModule, self.modules["group_chat"])
         with ModuleLogger(module).scope():
             request = await module.admit(event)
         if event.get_extra("juhkff_group_runtime_config") and event.get_extra(
@@ -269,7 +285,7 @@ class JuhkffPlugin(Star):
             event: Current group event.
             request: Official model request.
         """
-        module = self.modules["group_chat"]
+        module = cast(GroupChatModule, self.modules["group_chat"])
         with ModuleLogger(module).scope():
             await module.decorate(event, request)
 
@@ -281,7 +297,7 @@ class JuhkffPlugin(Star):
             event: Current group event.
             response: Official model response.
         """
-        module = self.modules["group_chat"]
+        module = cast(GroupChatModule, self.modules["group_chat"])
         with ModuleLogger(module).scope():
             await module.capture_response(event, response)
 
@@ -292,7 +308,7 @@ class JuhkffPlugin(Star):
         Args:
             event: Sent event.
         """
-        module = self.modules["group_chat"]
+        module = cast(GroupChatModule, self.modules["group_chat"])
         with ModuleLogger(module).scope():
             await module.after_sent(event)
 

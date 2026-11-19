@@ -6,6 +6,7 @@ Run with AstrBot and this plugin root on PYTHONPATH, separately from discovery.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import main
 from unittest.mock import AsyncMock, patch
 
@@ -25,12 +26,12 @@ class GroupChatRoutingTests(fixtures.GroupChatTests):
 
         async def prepare(event):
             visited.append("prepare")
-            await entry.JuhkffPlugin._prepare_group_chat(self.plugin, event)
+            await entry.JuhkffPlugin._prepare_group_chat(cast(Any, self.plugin), event)
 
         async def admit(event):
             visited.append("admit")
             async for result in entry.JuhkffPlugin._admit_group_chat(
-                self.plugin, event
+                cast(Any, self.plugin), event
             ):
                 # No context token may stay open while the framework owns a yield.
                 self.assertIsNone(module_log_scope.get())
@@ -70,10 +71,10 @@ class GroupChatRoutingTests(fixtures.GroupChatTests):
         event.set_extra("activated_handlers", handlers)
         event.set_extra("handlers_parsed_params", {})
         ctx = SimpleNamespace(astrbot_config=self.core_config)
-        stage = ProcessStage()
+        stage = cast(Any, ProcessStage())
         stage.ctx = ctx
         stage.star_request_sub_stage = star_request.StarRequestSubStage()
-        await stage.star_request_sub_stage.initialize(ctx)
+        await stage.star_request_sub_stage.initialize(cast(Any, ctx))
 
         async def agent_process(event):
             requests.append(event.get_extra("provider_request"))
@@ -142,11 +143,11 @@ class GroupChatRoutingTests(fixtures.GroupChatTests):
                 req = fixtures.ProviderRequest(
                     prompt="current", contexts=[{"role": "user", "content": "OLD_DB"}]
                 )
-                await entry.JuhkffPlugin._group_chat_context(self.plugin, event, req)
+                await entry.JuhkffPlugin._group_chat_context(cast(Any, self.plugin), event, req)
                 self.assertNotIn("OLD_DB", str(req.contexts))
                 self.assertTrue(all(m["role"] == "user" for m in req.contexts))
                 self.assertFalse(req.extra_user_content_parts)
-                self.assertTrue(req.prompt.startswith("[发言人："))
+                self.assertTrue((req.prompt or "").startswith("[发言人："))
 
     async def test_pipeline_active_admission_enters_default_exactly_once(self):
         self.module.cfg["probability"] = 1
@@ -154,11 +155,14 @@ class GroupChatRoutingTests(fixtures.GroupChatTests):
         self.core_config["wake_prefix"] = []
         wake_stage = waking.WakingCheckStage()
         await wake_stage.initialize(
-            SimpleNamespace(
-                astrbot_config=self.core_config,
-                astrbot_config_id="offline",
-                db_helper=None,
-                plugin_manager=SimpleNamespace(context=self.plugin.context),
+            cast(
+                Any,
+                SimpleNamespace(
+                    astrbot_config=self.core_config,
+                    astrbot_config_id="offline",
+                    db_helper=None,
+                    plugin_manager=SimpleNamespace(context=self.plugin.context),
+                ),
             )
         )
         listeners = [

@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, Mock, patch
 
-from astrbot.api.event import MessageChain
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Nodes, Plain
 from astrbot.api.platform import MessageType
 
@@ -17,7 +18,10 @@ from juhkff_modules import pixiv_browse as browse
 
 class BrowseHost(browse.PixivBrowseMixin):
     def __init__(self):
-        self.cfg = {"ranking": {"count": 2, "pool_pages": 2}, "random": {"count": 2}}
+        self.cfg: dict[str, Any] = {
+            "ranking": {"count": 2, "pool_pages": 2},
+            "random": {"count": 2},
+        }
         self._stopped = False
         self.enabled = True
         self.proxy = ""
@@ -50,16 +54,36 @@ def item(iid="7", pages=1, restriction=0):
     }
 
 
-def event(text, group=True, wake=True):
-    return SimpleNamespace(
-        message_str=text,
-        is_at_or_wake_command=wake,
-        unified_msg_origin="test:GroupMessage:1",
-        get_message_type=lambda: (
-            MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
+def event(text, group=True, wake=True) -> AstrMessageEvent:
+    return cast(
+        AstrMessageEvent,
+        SimpleNamespace(
+            message_str=text,
+            is_at_or_wake_command=wake,
+            unified_msg_origin="test:GroupMessage:1",
+            get_message_type=lambda: (
+                MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
+            ),
+            plain_result=lambda text: MessageChain([Plain(text)]),
         ),
-        plain_result=lambda text: MessageChain([Plain(text)]),
     )
+
+
+
+def at(chain: MessageChain | None, index: int = 0) -> Any:
+    assert chain is not None
+    return chain.chain[index]
+
+
+def must(chain: MessageChain | None) -> MessageChain:
+    assert chain is not None
+    return chain
+
+
+def awaited(mock: Any) -> Any:
+    called = mock.await_args
+    assert called is not None
+    return called
 
 
 class PixivBrowseTests(IsolatedAsyncioTestCase):
@@ -76,12 +100,12 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             "#pixiv作品 7 第0张",
         ):
             reply = await self.host.handle_browse(event(text))
-            self.assertIn("用法", reply.chain[0].text)
+            self.assertIn("用法", at(reply).text)
         reply = await self.host.handle_browse(event("#pixiv日榜", group=False))
-        self.assertIn("群聊", reply.chain[0].text)
+        self.assertIn("群聊", at(reply).text)
         self.host.enabled = False
         reply = await self.host.handle_browse(event("#pixiv日榜"))
-        self.assertIn("停用", reply.chain[0].text)
+        self.assertIn("停用", at(reply).text)
         self.assertFalse(self.host.browse_intercepts(event("pixiv日榜", wake=False)))
         self.assertTrue(self.host.browse_intercepts(event("/pixiv日榜", wake=False)))
 
@@ -108,10 +132,10 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             )
             await self.host.handle_browse(event(prefix + "作品 7 第1张", wake=False))
             self.assertEqual(
-                self.host._render_items.await_args.args[0][0]["_browse_page"], 0
+                awaited(self.host._render_items).args[0][0]["_browse_page"], 0
             )
         reply = await self.host.handle_browse(event("日榜 10", wake=False))
-        self.assertIn("用法", reply.chain[0].text)
+        self.assertIn("用法", at(reply).text)
         for text in ("日榜真好看", "今天看看日榜", "随机应变", "作品集", "订阅号"):
             self.assertFalse(self.host.browse_intercepts(event(text, wake=False)))
         self.host.cfg["allow_prefixless"] = False
@@ -130,11 +154,11 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
 
     async def test_single_image_direct_and_multiple_images_forward(self):
         result = await self.host._render_items([item()], self.umo)
-        self.assertIsInstance(result.chain[1], Image)
+        self.assertIsInstance(at(result, 1), Image)
         self.host._get_bot_id.assert_not_awaited()
         result = await self.host._render_items([item(pages=3)], self.umo)
-        self.assertIsInstance(result.chain[0], Nodes)
-        self.assertEqual(len(result.chain[0].nodes), 3)
+        self.assertIsInstance(at(result), Nodes)
+        self.assertEqual(len(at(result).nodes), 3)
         self.assertEqual(
             [call.args[2] for call in self.host._download.await_args_list[-3:]],
             [0, 1, 2],
@@ -159,25 +183,25 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 host._content_policy.return_value = (False, "link")
                 result = await host._render_items(works, self.umo)
                 if count == 1:
-                    self.assertEqual(len(result.chain), 1)
-                    self.assertIsInstance(result.chain[0], Plain)
-                    self.assertIn("https://i.pximg.net/7.png", result.chain[0].text)
+                    self.assertEqual(len(must(result).chain), 1)
+                    self.assertIsInstance(at(result), Plain)
+                    self.assertIn("https://i.pximg.net/7.png", at(result).text)
                     host._get_bot_id.assert_not_awaited()
                 else:
-                    self.assertIsInstance(result.chain[0], Nodes)
-                    self.assertEqual(len(result.chain[0].nodes), count)
+                    self.assertIsInstance(at(result), Nodes)
+                    self.assertEqual(len(at(result).nodes), count)
                     host._get_bot_id.assert_awaited_once_with(self.umo)
                 self.assertEqual(host._download.await_count, downloads)
         self.host._content_policy.return_value = (False, "image")
         result = await self.host._render_items([item(restriction=1)], self.umo)
-        self.assertIsInstance(result.chain[1], Image)
+        self.assertIsInstance(at(result, 1), Image)
 
     async def test_failed_download_raises_and_all_pages_preserve_original_rank(self):
         result = await self.host._render_items(
             [item(pages=4)], self.umo, ranks={"7": 19}
         )
-        self.assertEqual(len(result.chain[0].nodes), 4)
-        for index, node in enumerate(result.chain[0].nodes):
+        self.assertEqual(len(at(result).nodes), 4)
+        for index, node in enumerate(at(result).nodes):
             self.assertIn("排名 #19", node.content[0].text)
             self.assertIn(f"第 {index + 1}/4 张", node.content[0].text)
         self.host._fetch_pages.assert_awaited_once()
@@ -190,12 +214,12 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         reply = await self.host.handle_browse(
             event("#pixiv作品 https://www.pixiv.net/artworks/7 第2张")
         )
-        self.assertIsInstance(reply.chain[1], Image)
-        self.assertEqual(self.host._download.await_args.args[2], 1)
+        self.assertIsInstance(at(reply, 1), Image)
+        self.assertEqual(awaited(self.host._download).args[2], 1)
         reply = await self.host.handle_browse(event("#pixiv作品 7"))
-        self.assertEqual(len(reply.chain[0].nodes), 3)
+        self.assertEqual(len(at(reply).nodes), 3)
         reply = await self.host.handle_browse(event("#pixiv作品 7 第4张"))
-        self.assertIn("超出范围", reply.chain[0].text)
+        self.assertIn("超出范围", at(reply).text)
 
     async def test_rankings_and_daily_push_show_all_pages_with_work_count_limit(self):
         for command in ("#pixiv日榜", "#pixiv周榜", "#pixiv月榜", "scheduled"):
@@ -214,10 +238,10 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     }
                     await host.push_daily_ranking()
                     host.plugin.context.send_message.assert_awaited_once()
-                    result = host.plugin.context.send_message.await_args.args[1]
+                    result = awaited(host.plugin.context.send_message).args[1]
                 else:
                     result = await host.handle_browse(event(command))
-                nodes = result.chain[0].nodes
+                nodes = at(result).nodes
                 self.assertEqual(len(nodes), 5)
                 self.assertEqual(
                     [call.args[0] for call in host._fetch_detail.await_args_list],
@@ -249,10 +273,10 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         ) as fetch:
             candidates = await self.host._browse_candidates("monthly", 2)
         self.assertEqual(candidates, [("7", 14), ("8", 20), ("9", 24)])
-        self.assertEqual(fetch.await_args.kwargs["allowed_hosts"], {"www.pixiv.net"})
-        self.assertTrue(fetch.await_args.kwargs["proxy_resolve"])
-        self.assertEqual(fetch.await_args.kwargs["headers"]["Cookie"], "session=test")
-        self.assertEqual(fetch.await_args.kwargs["params"]["mode"], "monthly")
+        self.assertEqual(awaited(fetch).kwargs["allowed_hosts"], {"www.pixiv.net"})
+        self.assertTrue(awaited(fetch).kwargs["proxy_resolve"])
+        self.assertEqual(awaited(fetch).kwargs["headers"]["Cookie"], "session=test")
+        self.assertEqual(awaited(fetch).kwargs["params"]["mode"], "monthly")
 
     async def test_random_search_quoted_and_filtered_pool_replenished(self):
         self.host.cfg["random"]["search_pages"] = 1
@@ -272,12 +296,12 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             result = await self.host.handle_browse(event("#pixiv随机 风景/天空"))
         shuffle.assert_called_once()
         self.assertIn(
-            "%E9%A3%8E%E6%99%AF%2F%E5%A4%A9%E7%A9%BA", fetch.await_args.args[0]
+            "%E9%A3%8E%E6%99%AF%2F%E5%A4%A9%E7%A9%BA", awaited(fetch).args[0]
         )
-        self.assertEqual(fetch.await_args.kwargs["params"]["s_mode"], "s_tc")
-        self.assertEqual(fetch.await_args.kwargs["params"]["order"], "date_d")
-        self.assertEqual(fetch.await_args.kwargs["params"]["mode"], "all")
-        self.assertEqual(len(result.chain[0].nodes), 2)
+        self.assertEqual(awaited(fetch).kwargs["params"]["s_mode"], "s_tc")
+        self.assertEqual(awaited(fetch).kwargs["params"]["order"], "date_d")
+        self.assertEqual(awaited(fetch).kwargs["params"]["mode"], "all")
+        self.assertEqual(len(at(result).nodes), 2)
         self.assertEqual(
             [call.args[0]["id"] for call in self.host._download.await_args_list],
             ["8", "9"],
@@ -297,7 +321,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             "time": "10:15",
         }
         await self.host.start_browse()
-        self.assertEqual(self.host.scheduler.daily.await_args.args[0], "10:15")
+        self.assertEqual(awaited(self.host.scheduler.daily).args[0], "10:15")
         calls = []
 
         async def render(origin, **kwargs):
@@ -313,7 +337,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.assertFalse(self.host._checks)
         self.host.plugin.context.send_message.assert_awaited_once()
         self.assertEqual(
-            self.host.plugin.context.send_message.await_args.args[0],
+            awaited(self.host.plugin.context.send_message).args[0],
             "other:GroupMessage:2",
         )
 
@@ -351,7 +375,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         adult["original"] = "https://i.pximg.net/source.png"
         self.host._content_policy.return_value = (False, "image")
         await self.host._render_items([adult], self.umo)
-        self.assertTrue(self.host._download.await_args.kwargs["source_only"])
+        self.assertTrue(awaited(self.host._download).kwargs["source_only"])
 
     async def test_filtered_rank_keeps_original_position(self):
         self.host.cfg["ranking"]["count"] = 1
@@ -360,9 +384,9 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             iid, restriction=1 if iid == "7" else 0
         )
         result = await self.host.handle_browse(event("#pixiv日榜"))
-        self.assertIn("排名 #13", result.chain[0].text)
+        self.assertIn("排名 #13", at(result).text)
         self.host._fetch_pages.assert_awaited_once()
-        self.assertEqual(self.host._download.await_args.args[0]["id"], "8")
+        self.assertEqual(awaited(self.host._download).args[0]["id"], "8")
 
     async def test_network_error_is_clear_and_does_not_send(self):
         with patch.object(
@@ -371,7 +395,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             AsyncMock(side_effect=RuntimeError("Fixture network failure")),
         ):
             result = await self.host.handle_browse(event("#pixiv日榜"))
-        self.assertIn("请求或图片下载失败", result.chain[0].text)
+        self.assertIn("请求或图片下载失败", at(result).text)
         self.host.plugin.context.send_message.assert_not_awaited()
 
     async def test_forward_account_await_rechecks_policy_and_stopping(self):

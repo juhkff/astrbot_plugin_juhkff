@@ -8,13 +8,22 @@ import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, Mock, patch
+
+from astrbot.api.event import AstrMessageEvent
 
 from juhkff_modules import pixiv_push as pixiv
 from PIL import Image
 from astrbot.api.message_components import Image as MessageImage
+from astrbot.api.message_components import Plain
+
+
+def awaited(mock: Any) -> Any:
+    called = mock.await_args
+    assert called is not None
+    return called
 
 
 class PixivPushTests(IsolatedAsyncioTestCase):
@@ -68,16 +77,22 @@ class PixivPushTests(IsolatedAsyncioTestCase):
     async def test_subscription_aliases_share_validation_and_dynamic_help(self):
         for prefix in ("", "#", "/"):
             for verb in ("订阅", "取消订阅"):
-                e = SimpleNamespace(
-                    message_str=prefix + verb + " 7",
-                    is_at_or_wake_command=False,
-                    get_message_type=lambda: pixiv.MessageType.GROUP_MESSAGE,
-                    plain_result=lambda text: pixiv.MessageChain().message(text),
+                e = cast(
+                    AstrMessageEvent,
+                    SimpleNamespace(
+                        message_str=prefix + verb + " 7",
+                        is_at_or_wake_command=False,
+                        get_message_type=lambda: pixiv.MessageType.GROUP_MESSAGE,
+                        plain_result=lambda text: pixiv.MessageChain().message(text),
+                    ),
                 )
                 self.assertTrue(self.module.intercepts(e))
                 # Dict configuration cannot persist; reaching this error proves parsing succeeded.
                 result = await self.module.handle(e)
-                self.assertIn("订阅保存失败", result.chain[0].text)
+                assert result is not None
+                component = result.chain[0]
+                assert isinstance(component, Plain)
+                self.assertIn("订阅保存失败", component.text)
                 self.module.cfg["allow_prefixless"] = False
                 self.assertFalse(self.module.intercepts(e))
                 self.assertIsNone(await self.module.handle(e))
@@ -107,9 +122,9 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             pixiv, "fetch_json", AsyncMock(return_value=response)
         ) as fetch:
             self.assertEqual(await self.module._fetch_ids("7"), ["2", "10"])
-        assert fetch.await_args is not None
-        self.assertEqual(fetch.await_args.kwargs["allowed_hosts"], {"www.pixiv.net"})
-        self.assertTrue(fetch.await_args.kwargs["proxy_resolve"])
+        assert awaited(fetch) is not None
+        self.assertEqual(awaited(fetch).kwargs["allowed_hosts"], {"www.pixiv.net"})
+        self.assertTrue(awaited(fetch).kwargs["proxy_resolve"])
 
     async def test_detail_and_pages_reject_foreign_or_private_image_urls(self):
         for url in (
@@ -150,15 +165,15 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         ) as fetch:
             path = await self.module._download(item, item, 0, "7")
             assert path is not None
-            assert fetch.await_args is not None
+            assert awaited(fetch) is not None
             self.assertEqual(path.read_bytes(), self.payload)
-            self.assertEqual(fetch.await_args.args[0], item["original"])
-            self.assertEqual(fetch.await_args.kwargs["max_bytes"], 64 * 1024 * 1024)
+            self.assertEqual(awaited(fetch).args[0], item["original"])
+            self.assertEqual(awaited(fetch).kwargs["max_bytes"], 64 * 1024 * 1024)
             self.assertEqual(
-                fetch.await_args.kwargs["allowed_hosts"], {"i.pximg.net", "i.pixiv.re"}
+                awaited(fetch).kwargs["allowed_hosts"], {"i.pximg.net", "i.pixiv.re"}
             )
-            self.assertEqual(fetch.await_args.kwargs["proxy"], "http://127.0.0.1:7890")
-            self.assertTrue(fetch.await_args.kwargs["proxy_resolve"])
+            self.assertEqual(awaited(fetch).kwargs["proxy"], "http://127.0.0.1:7890")
+            self.assertTrue(awaited(fetch).kwargs["proxy_resolve"])
             self.assertEqual(await self.module._download(item, item, 0, "7"), path)
             fetch.assert_awaited_once()
 
@@ -384,7 +399,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         self.assertTrue(await self.module._check_artist("7"))
         self.module._download.assert_not_awaited()
         self.plugin.context.send_message.assert_awaited_once()
-        args = self.plugin.context.send_message.await_args.args
+        args = awaited(self.plugin.context.send_message).args
         self.assertEqual(args[0], self.groups[1])
         self.assertIn(item["original"], "\n".join(c.text for c in args[1].chain))
 
@@ -463,16 +478,16 @@ class PixivPushTests(IsolatedAsyncioTestCase):
                     await self.module._check_login()
                 fetch.assert_awaited_once()
                 self.assertEqual(
-                    fetch.await_args.args[0], "https://www.pixiv.net/ajax/user/extra"
+                    awaited(fetch).args[0], "https://www.pixiv.net/ajax/user/extra"
                 )
                 self.assertEqual(
-                    fetch.await_args.kwargs["headers"]["Cookie"],
+                    awaited(fetch).kwargs["headers"]["Cookie"],
                     "PHPSESSID=fixture-secret",
                 )
-                self.assertEqual(fetch.await_args.kwargs["proxy"], self.module.proxy)
-                self.assertTrue(fetch.await_args.kwargs["proxy_resolve"])
+                self.assertEqual(awaited(fetch).kwargs["proxy"], self.module.proxy)
+                self.assertTrue(awaited(fetch).kwargs["proxy_resolve"])
                 self.assertEqual(
-                    fetch.await_args.kwargs["allowed_hosts"], {"www.pixiv.net"}
+                    awaited(fetch).kwargs["allowed_hosts"], {"www.pixiv.net"}
                 )
                 (log.info if valid else log.warning).assert_called_once_with(
                     f"[juhkff] Pixiv login: {expected}"
@@ -529,13 +544,16 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             task = self.module._login_task
             await self.module.stop()
             self.assertTrue(cancelled.is_set())
+            assert task is not None
             self.assertTrue(task.cancelled())
             self.assertIsNone(self.module._login_task)
             log.warning.assert_not_called()
             fetch.side_effect = None
             fetch.return_value = {"error": False, "body": {}}
             await self.module.start()
-            await asyncio.wait_for(self.module._login_task, 1)
+            login_task = self.module._login_task
+            assert login_task is not None
+            await asyncio.wait_for(login_task, 1)
             self.assertEqual(fetch.await_count, 2)
             log.info.assert_any_call("[juhkff] Pixiv login: valid")
 
@@ -587,8 +605,9 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         ) as fetch:
             path = await self.module._download(item, item, 0, source_only=True)
         self.assertIsNotNone(path)
+        assert path is not None
         self.assertEqual(path.read_bytes(), self.payload)
-        self.assertNotIn("Cookie", fetch.await_args.kwargs["headers"])
+        self.assertNotIn("Cookie", awaited(fetch).kwargs["headers"])
 
 
 if __name__ == "__main__":
