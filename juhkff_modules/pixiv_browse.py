@@ -361,6 +361,7 @@ class PixivBrowseMixin:
         entries = []
         entry_sizes: list[int] = []
         entry_work_ids: list[str] = []
+        work_captions: dict[str, str] = {}
         local_files = self.cfg.get("image_transport", "base64") == "file"
         filter_r18, display = self._content_policy(umo)
         self.log.info("[juhkff] Pixiv preparing artwork pages: works=%s", len(items))
@@ -391,6 +392,7 @@ class PixivBrowseMixin:
                     + f"{item['title']}\n{item['author']}\n"
                     + f"https://www.pixiv.net/artworks/{item['id']}\n"
                 )
+                work_captions[item["id"]] = caption
                 if restricted and display == "link":
                     if not source.get("original"):
                         raise RuntimeError(
@@ -456,10 +458,26 @@ class PixivBrowseMixin:
                 work_node = None
             page_node = Node(name="Pixiv", uin=bot_id, content=entry)
             if work_id == previous_work:
+                pages_to_strip = [page_node]
                 if work_node is None:
-                    # Node content accepts nested node segments. Nodes itself is
-                    # an API envelope, not a segment that can go inside content.
-                    work_node = Node(name="Pixiv", uin=bot_id, content=[nodes.pop()])
+                    pages_to_strip.append(nodes[-1])
+                for page in pages_to_strip:
+                    text = page.content[0]
+                    if isinstance(text, Plain):
+                        remainder = text.text.removeprefix(work_captions[work_id])
+                        page.content = (
+                            [Plain(remainder)] if remainder else []
+                        ) + page.content[1:]
+                if work_node is None:
+                    # Strip the first page before nesting: Pydantic may copy nodes.
+                    header = Node(
+                        name="Pixiv",
+                        uin=bot_id,
+                        content=[Plain(work_captions[work_id])],
+                    )
+                    work_node = Node(
+                        name="Pixiv", uin=bot_id, content=[header, nodes.pop()]
+                    )
                     nodes.append(work_node)
                 work_node.content.append(page_node)
             else:

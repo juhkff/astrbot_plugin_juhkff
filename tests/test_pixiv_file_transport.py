@@ -140,17 +140,19 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
                     nodes = call.kwargs["messages"]
                     self.assertEqual(len(nodes), 1)
                     pages = nodes[0]["data"]["content"]
-                    self.assertEqual(len(pages), 26)
-                    for index, node in enumerate(pages):
+                    self.assertEqual(len(pages), 27)
+                    header = pages[0]["data"]["content"]
+                    self.assertEqual([part["type"] for part in header], ["text"])
+                    self.assertIn("/artworks/7", header[0]["data"]["text"])
+                    self.assertEqual(payload.count("/artworks/7"), 1)
+                    self.assertNotRegex(header[0]["data"]["text"], r"第\s*\d+/\d+\s*张")
+                    for index, node in enumerate(pages[1:]):
                         self.assertEqual(node["type"], "node")
                         content = node["data"]["content"]
-                        self.assertIn("/artworks/7", content[0]["data"]["text"])
-                        self.assertNotRegex(
-                            content[0]["data"]["text"], r"第\s*\d+/\d+\s*张"
-                        )
-                        uri = content[1]["data"]["file"]
+                        self.assertEqual(len(content), 1)
+                        uri = content[0]["data"]["file"]
                         self.assertEqual(uri, self.images[index].as_uri())
-                        self.assertEqual(content[1]["type"], "image")
+                        self.assertEqual(content[0]["type"], "image")
                         self.assertEqual(
                             Path(unquote(urlsplit(uri).path)).read_bytes(),
                             self.images[index].read_bytes(),
@@ -185,7 +187,8 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
         assert call is not None
         self.assertEqual(call.args[0], "send_group_forward_msg")
         self.assertEqual(len(call.kwargs["messages"]), 1)
-        self.assertEqual(len(call.kwargs["messages"][0]["data"]["content"]), 26)
+        self.assertEqual(len(call.kwargs["messages"][0]["data"]["content"]), 27)
+        self.assertEqual(json.dumps(call.kwargs).count("/artworks/7"), 1)
         self.assertNotIn("base64://", json.dumps(call.kwargs))
 
     async def test_artist_push_uses_the_same_file_transport_and_advances_progress(self):
@@ -196,7 +199,8 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
         call = self.bot.call_action.await_args
         assert call is not None
         self.assertEqual(len(call.kwargs["messages"]), 1)
-        self.assertEqual(len(call.kwargs["messages"][0]["data"]["content"]), 26)
+        self.assertEqual(len(call.kwargs["messages"][0]["data"]["content"]), 27)
+        self.assertEqual(json.dumps(call.kwargs).count("/artworks/2"), 1)
         self.assertNotIn("base64://", json.dumps(call.kwargs))
         self.assertEqual(self.module._artists["7"]["last_id"], "2")
 
@@ -212,10 +216,15 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
         call = self.bot.call_action.await_args
         assert call is not None
         pages = call.kwargs["messages"][0]["data"]["content"]
-        self.assertEqual(len(pages), 26)
-        for node in pages:
+        self.assertEqual(len(pages), 27)
+        self.assertIn("/artworks/7", pages[0]["data"]["content"][0]["data"]["text"])
+        for node in pages[1:]:
             self.assertEqual(node["type"], "node")
             content = node["data"]["content"]
             self.assertEqual(len(content), 1)
             self.assertEqual(content[0]["type"], "text")
+            self.assertTrue(
+                content[0]["data"]["text"].startswith("https://i.pximg.net/")
+            )
+            self.assertNotIn("/artworks/7", content[0]["data"]["text"])
         self.download.assert_not_awaited()

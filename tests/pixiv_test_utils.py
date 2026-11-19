@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 
-from astrbot.api.message_components import Node
+from astrbot.api.message_components import ComponentType, Node, Plain
 
 
 def page_nodes(nodes: Iterable[Node]) -> list[Node]:
@@ -17,5 +17,18 @@ def page_nodes(nodes: Iterable[Node]) -> list[Node]:
     pages = []
     for node in nodes:
         children = [part for part in node.content if isinstance(part, Node)]
-        pages.extend(page_nodes(children) if children else [node])
+        if children:
+            pages.extend(page_nodes(children))
+        elif any(
+            part.type == ComponentType.Image
+            or (
+                isinstance(part, Plain)
+                and any(
+                    host in part.text
+                    for host in ("https://i.pximg.net/", "https://i.pixiv.re/")
+                )
+            )
+            for part in node.content
+        ):
+            pages.append(node)
     return pages

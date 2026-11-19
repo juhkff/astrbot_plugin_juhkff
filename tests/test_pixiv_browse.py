@@ -219,22 +219,30 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     self.assertIn(f"/artworks/{iid}\n", content[0]["data"]["text"])
                     self.assertIn(f"排名 #{rank}", content[0]["data"]["text"])
                 pages = works[1]["data"]["content"]
-                self.assertEqual(len(pages), 3)
-                for page in pages:
+                self.assertEqual(len(pages), 4)
+                header = pages[0]["data"]["content"]
+                self.assertEqual([part["type"] for part in header], ["text"])
+                self.assertIn("/artworks/2\n", header[0]["data"]["text"])
+                self.assertIn("排名 #7", header[0]["data"]["text"])
+                for page in pages[1:]:
                     self.assertEqual(page["type"], "node")
                     self.assertNotIn("messages", page)
                     content = page["data"]["content"]
-                    self.assertEqual(
-                        [part["type"] for part in content], ["text", "image"]
-                    )
-                    self.assertIn("/artworks/2\n", content[0]["data"]["text"])
-                    self.assertIn("排名 #7", content[0]["data"]["text"])
+                    self.assertEqual([part["type"] for part in content], ["image"])
+                self.assertEqual(json.dumps(works).count("/artworks/2"), 1)
                 self.assertNotRegex(
                     json.dumps(works, ensure_ascii=False), r"第\s*\d+/\d+\s*张"
                 )
 
     async def test_base64_batch_boundaries_keep_every_work_page_in_order(self):
         self.host.cfg["image_transport"] = "base64"
+        images = {}
+        for iid in ("1", "2"):
+            images[iid] = self.folder / f"{iid}.png"
+            images[iid].write_bytes(self.image.read_bytes())
+        self.host._download.side_effect = lambda work, *args, **kwargs: images[
+            work["id"]
+        ]
         with patch.object(browse, "_FORWARD_BATCH_BYTES", 4096):
             result = must(
                 await self.host._render_items(
@@ -242,18 +250,18 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 )
             )
         self.assertGreater(len(result.chain), 1)
-        captions = []
+        files = []
         for batch in result.chain:
             assert isinstance(batch, Nodes)
             payload = await batch.to_dict()
             self.assertLess(len(json.dumps(payload).encode()), 4096)
             for page in page_nodes(batch.nodes):
-                caption = page.content[0]
-                assert isinstance(caption, Plain)
-                captions.append(caption.text)
-        self.assertEqual(len(captions), 6)
-        for caption, iid in zip(captions, ("1", "1", "1", "2", "2", "2")):
-            self.assertIn(f"/artworks/{iid}\n", caption)
+                image = page.content[-1]
+                assert isinstance(image, Image)
+                files.append(image.file)
+        self.assertEqual(
+            files, [images[iid].as_uri() for iid in ("1", "1", "1", "2", "2", "2")]
+        )
 
     async def test_reported_26_original_images_are_split_without_losing_pages(self):
         sizes = [
@@ -397,11 +405,13 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(at(result).nodes), 1)
         nodes = page_nodes(at(result).nodes)
         self.assertEqual(len(nodes), 4)
+        header = at(result).nodes[0].content[0].content[0]
+        self.assertIsInstance(header, Plain)
+        self.assertIn("排名 #19", header.text)
+        self.assertNotRegex(header.text, r"第\s*\d+/\d+\s*张")
         for node in nodes:
-            caption = node.content[0]
-            assert isinstance(caption, Plain)
-            self.assertIn("排名 #19", caption.text)
-            self.assertNotRegex(caption.text, r"第\s*\d+/\d+\s*张")
+            self.assertEqual(len(node.content), 1)
+            self.assertIsInstance(node.content[0], Image)
         self.host._fetch_pages.assert_awaited_once()
         self.host._download.return_value = None
         with self.assertRaises(RuntimeError):
@@ -451,17 +461,21 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     [call.args[2] for call in host._download.await_args_list],
                     [0, 1, 0, 1, 2],
                 )
-                for node, iid, rank in zip(
-                    nodes,
-                    ["7", "7", "8", "8", "8"],
-                    [9, 9, 20, 20, 20],
+                for work, iid, rank, count in zip(
+                    at(result).nodes,
+                    ("7", "8"),
+                    (9, 20),
+                    (2, 3),
                 ):
-                    caption = node.content[0]
+                    self.assertEqual(len(work.content), count + 1)
+                    caption = work.content[0].content[0]
                     assert isinstance(caption, Plain)
                     self.assertIn(f"排名 #{rank}\n", caption.text)
                     self.assertIn(f"/artworks/{iid}\n", caption.text)
                     self.assertNotRegex(caption.text, r"第\s*\d+/\d+\s*张")
-                    self.assertIsInstance(node.content[1], Image)
+                    for node in work.content[1:]:
+                        self.assertEqual(len(node.content), 1)
+                        self.assertIsInstance(node.content[0], Image)
 
     async def test_ranking_raw_json_pages_and_api_allowlist(self):
         responses = [
