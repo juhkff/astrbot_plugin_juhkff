@@ -1129,6 +1129,23 @@
           "step": 1
         }
       },
+      "cache_retention_days": {
+        "description": "图片缓存保留天数",
+        "type": "int",
+        "default": 7,
+        "hint": "按文件最后修改时间计算，定时删除保存已满指定天数的原图、预览图、压缩版和临时文件，并清理空目录；0 表示关闭自动清理。清理后再次取图会重新下载，不影响订阅进度。",
+        "slider": {
+          "min": 0,
+          "max": 365,
+          "step": 1
+        }
+      },
+      "cache_cleanup_time": {
+        "description": "图片缓存每日清理时间",
+        "type": "string",
+        "default": "00:00",
+        "hint": "HH:MM 格式，默认每天 0 点执行，采用全局时区。修改后重载插件生效。"
+      },
       "max_image_mb": {
         "description": "图片压缩阈值（MB）",
         "type": "float",

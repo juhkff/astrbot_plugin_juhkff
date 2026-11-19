@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -48,7 +49,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
                 },
             },
             context=SimpleNamespace(send_message=AsyncMock(return_value=True)),
-            scheduler=SimpleNamespace(every_minutes=AsyncMock()),
+            scheduler=SimpleNamespace(every_minutes=AsyncMock(), daily=AsyncMock()),
         )
         self.module = pixiv.PixivPushModule(self.plugin)
         self.modules = [self.module]
@@ -73,6 +74,99 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             "original": f"https://i.pximg.net/original/{illust_id}_p0.png",
             "regular": f"https://i.pximg.net/regular/{illust_id}_p0.png",
         }
+
+    async def test_cache_cleanup_schedule_defaults_and_custom_time(self):
+        for configured, expected in ((None, "00:00"), ("02:30", "02:30")):
+            if configured is not None:
+                self.module.cfg["cache_cleanup_time"] = configured
+            self.plugin.scheduler.daily.reset_mock()
+            with (
+                patch.object(self.module, "check", AsyncMock()),
+                patch.object(self.module, "_check_login", AsyncMock()),
+            ):
+                await self.module.start()
+                self.plugin.scheduler.daily.assert_awaited_once_with(
+                    expected,
+                    self.module.cleanup_image_cache,
+                    "pixiv-cache-cleanup",
+                    tz_name=self.module.tz_name,
+                )
+                await self.module.stop()
+
+    async def test_cache_cleanup_expires_files_and_preserves_other_data(self):
+        root = self.folder / "pixiv" / "images"
+        now = time.time()
+        cutoff = now - 7 * 86400
+
+        def cached(name: str, modified: float) -> Path:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self.payload)
+            os.utime(path, (modified, modified))
+            return path
+
+        expired = [
+            cached("2_p0/original.png", cutoff - 1),
+            cached("2_p0/original_1024.jpg", cutoff - 1),
+            cached("legacy.jpg", cutoff),
+            cached("3_p0/regular.png.tmp", cutoff - 100),
+        ]
+        recent = cached("4_p0/original.png", cutoff + 1)
+        mixed_old = cached("4_p0/regular.png", cutoff - 1)
+        pending = root / "5_p0"
+        pending.mkdir()
+        outside = self.folder / "pixiv_subscriptions.json"
+        outside.write_text("checkpoint")
+        os.utime(outside, (0, 0))
+        # Old symlinks and symlinked directories must not expose external files.
+        (root / "link.png").symlink_to(outside)
+        external_dir = self.folder / "other"
+        external_dir.mkdir()
+        external = external_dir / "original.png"
+        external.write_bytes(self.payload)
+        os.utime(external, (0, 0))
+        (root / "linked_folder").symlink_to(external_dir, target_is_directory=True)
+
+        with patch.object(pixiv.time, "time", return_value=now):
+            await self.module.cleanup_image_cache()
+        for path in [*expired, mixed_old]:
+            self.assertFalse(path.exists(), path)
+        self.assertFalse((root / "2_p0").exists())
+        self.assertFalse((root / "3_p0").exists())
+        self.assertTrue(recent.exists())
+        self.assertTrue(pending.is_dir())
+        self.assertEqual(outside.read_text(), "checkpoint")
+        self.assertTrue(external.exists())
+        self.assertTrue((root / "link.png").is_symlink())
+        self.assertEqual(self.module._checks, set())
+
+    async def test_cache_cleanup_disabled_invalid_and_stopped(self):
+        for value in (0, -1, True, "7", 1.5):
+            self.module.cfg["cache_retention_days"] = value
+            with patch.object(self.module, "_prune_image_cache") as prune:
+                await self.module.cleanup_image_cache()
+            prune.assert_not_called()
+        self.module.cfg["cache_retention_days"] = 7
+        self.module._stopped = True
+        with patch.object(self.module, "_prune_image_cache") as prune:
+            await self.module.cleanup_image_cache()
+        prune.assert_not_called()
+
+    async def test_cache_cleanup_missing_directory_and_custom_retention(self):
+        await self.module.cleanup_image_cache()
+        self.assertFalse((self.folder / "pixiv").exists())
+        root = self.folder / "pixiv" / "images"
+        root.mkdir(parents=True)
+        old = root / "old.jpg"
+        old.write_bytes(self.payload)
+        modified = time.time() - 3 * 86400
+        os.utime(old, (modified, modified))
+        self.module.cfg["cache_retention_days"] = 4
+        await self.module.cleanup_image_cache()
+        self.assertTrue(old.exists())
+        self.module.cfg["cache_retention_days"] = 2
+        await self.module.cleanup_image_cache()
+        self.assertFalse(old.exists())
 
     async def test_subscription_aliases_share_validation_and_dynamic_help(self):
         for prefix in ("", "#", "/"):

@@ -49,6 +49,7 @@ _API_HOSTS = {"www.pixiv.net"}
 _IMAGE_HOSTS = {"i.pximg.net", "i.pixiv.re"}
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
 _LOGIN_INFO_TIMEOUT = 10.0
+_IMAGE_PROCESS_TIMEOUT = 30.0
 
 _BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -347,6 +348,12 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
             1, self.check, "pixiv-check", tz_name=self.tz_name
         )
         await self.start_browse()
+        await self.scheduler.daily(
+            self.cfg.get("cache_cleanup_time", "00:00"),
+            self.cleanup_image_cache,
+            "pixiv-cache-cleanup",
+            tz_name=self.tz_name,
+        )
         self._login_task = asyncio.create_task(
             self._check_login(), name="juhkff-pixiv-login-check"
         )
@@ -841,7 +848,21 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                         or (delivery_active is not None and not delivery_active())
                     ):
                         return None
+                    stage = "read"
+                    started = time.monotonic()
                     try:
+                        self.log.info(
+                            "[juhkff] Pixiv image read started: artwork=%s, page=%s, "
+                            "source=%s, location=%s",
+                            item["id"],
+                            index + 1,
+                            kind,
+                            "cache"
+                            if isinstance(candidate, Path)
+                            else "primary"
+                            if candidate == url
+                            else "mirror",
+                        )
                         if (
                             isinstance(candidate, Path)
                             and candidate.stat().st_size > _MAX_IMAGE_BYTES
@@ -862,6 +883,14 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                                 proxy_resolve=True,
                             )
                         )
+                        self.log.info(
+                            "[juhkff] Pixiv image bytes ready: artwork=%s, page=%s, "
+                            "bytes=%s, elapsed=%.1fs",
+                            item["id"],
+                            index + 1,
+                            len(payload),
+                            time.monotonic() - started,
+                        )
                         if (
                             self._stopped
                             or not self.enabled
@@ -869,7 +898,11 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                             or (delivery_active is not None and not delivery_active())
                         ):
                             return None
-                        raw = await asyncio.to_thread(_prepare_image, payload, 0)
+                        stage = "validation"
+                        raw = await asyncio.wait_for(
+                            asyncio.to_thread(_prepare_image, payload, 0),
+                            timeout=_IMAGE_PROCESS_TIMEOUT,
+                        )
                         if (
                             self._stopped
                             or not self.enabled
@@ -878,6 +911,11 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                         ):
                             return None
                         if raw is None:
+                            self.log.warning(
+                                "[juhkff] Pixiv image validation failed: artwork=%s, page=%s",
+                                item["id"],
+                                index + 1,
+                            )
                             continue
                         raw_bytes, suffix = raw
                         target = folder / f"{kind}{suffix}"
@@ -886,9 +924,27 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                             temporary.write_bytes(raw_bytes)
                             temporary.replace(target)
                         if limit == 0 or len(raw_bytes) <= limit:
+                            self.log.info(
+                                "[juhkff] Pixiv image ready: artwork=%s, page=%s, "
+                                "bytes=%s, compressed=False, elapsed=%.1fs",
+                                item["id"],
+                                index + 1,
+                                len(raw_bytes),
+                                time.monotonic() - started,
+                            )
                             return target
-                        prepared = await asyncio.to_thread(
-                            _prepare_image, raw_bytes, limit
+                        stage = "compression"
+                        self.log.info(
+                            "[juhkff] Pixiv image compression started: artwork=%s, "
+                            "page=%s, bytes=%s, limit=%s",
+                            item["id"],
+                            index + 1,
+                            len(raw_bytes),
+                            limit,
+                        )
+                        prepared = await asyncio.wait_for(
+                            asyncio.to_thread(_prepare_image, raw_bytes, limit),
+                            timeout=_IMAGE_PROCESS_TIMEOUT,
                         )
                         if (
                             self._stopped
@@ -904,12 +960,32 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                         temporary = target.with_suffix(suffix + ".tmp")
                         temporary.write_bytes(compressed)
                         temporary.replace(target)
+                        self.log.info(
+                            "[juhkff] Pixiv image ready: artwork=%s, page=%s, "
+                            "bytes=%s, compressed=True, elapsed=%.1fs",
+                            item["id"],
+                            index + 1,
+                            len(compressed),
+                            time.monotonic() - started,
+                        )
                         return target
+                    except asyncio.TimeoutError:
+                        self.log.warning(
+                            "[juhkff] Pixiv image %s timed out: artwork=%s, page=%s",
+                            stage,
+                            item["id"],
+                            index + 1,
+                        )
+                        if stage != "read":
+                            # A worker thread may still be finishing: do not queue
+                            # more decoding jobs for alternate URLs on timeout.
+                            return None
                     except Exception as exc:
                         self.log.warning(
-                            "[juhkff] Pixiv page attempt failed for %s p%s: %s",
+                            "[juhkff] Pixiv page attempt failed for %s p%s: %s: %s",
                             item["id"],
                             index,
+                            type(exc).__name__,
                             exc,
                         )
                         if isinstance(
@@ -924,6 +1000,77 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                 "[juhkff] Failed to cache Pixiv page: %s p%s", item["id"], index
             )
         return None
+
+    async def cleanup_image_cache(self) -> None:
+        """Remove expired image files on the daily schedule without blocking I/O."""
+        if self._stopped or not self.enabled:
+            return
+        days = self.cfg.get("cache_retention_days", 7)
+        if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+            self.log.warning("[juhkff] Invalid Pixiv cache retention days: %r", days)
+            return
+        if days == 0:
+            return
+        task = asyncio.current_task()
+        if task is not None:
+            self._checks.add(task)
+        try:
+            deleted, size = await asyncio.to_thread(
+                self._prune_image_cache, time.time() - days * 86400
+            )
+            self.log.info(
+                "[juhkff] Pixiv cache cleanup: deleted=%s, freed_bytes=%s, retention_days=%s",
+                deleted,
+                size,
+                days,
+            )
+        finally:
+            if task is not None:
+                self._checks.discard(task)
+
+    def _prune_image_cache(self, cutoff: float) -> tuple[int, int]:
+        """Prune old files and empty directories strictly within the image cache."""
+        root = data_dir() / "pixiv" / "images"
+        if root.is_symlink() or not root.is_dir():
+            return 0, 0
+        root = root.resolve()
+        deleted = size = 0
+        for folder, _, filenames in os.walk(root, topdown=False, followlinks=False):
+            if self._stopped or not self.enabled:
+                break
+            directory = Path(folder)
+            removed_here = False
+            for name in filenames:
+                path = directory / name
+                try:
+                    # Never follow a cache symlink into another plugin's data.
+                    if path.is_symlink() or not path.resolve().is_relative_to(root):
+                        continue
+                    stat = path.stat()
+                    if not path.is_file() or stat.st_mtime > cutoff:
+                        continue
+                    path.unlink()
+                    removed_here = True
+                    deleted += 1
+                    size += stat.st_size
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    self.log.exception(
+                        "[juhkff] Failed to remove Pixiv cache file: %s", path
+                    )
+            if directory != root:
+                try:
+                    # Preserve fresh empty folders awaiting a network download.
+                    if (
+                        not directory.is_symlink()
+                        and directory.resolve().is_relative_to(root)
+                        and (removed_here or directory.stat().st_mtime <= cutoff)
+                    ):
+                        directory.rmdir()
+                except OSError:
+                    pass
+        return deleted, size
 
     async def _get_bot_id(self, umo: str) -> str:
         """Read the connected sender before a bounded login-info fallback.
@@ -1015,7 +1162,6 @@ def _prepare_image(payload: bytes, limit: int) -> tuple[bytes, str] | None:
         from PIL import Image as PILImage
 
         with PILImage.open(io.BytesIO(payload)) as source:
-            source.load()
             suffix = {
                 "JPEG": ".jpg",
                 "PNG": ".png",
@@ -1025,9 +1171,12 @@ def _prepare_image(payload: bytes, limit: int) -> tuple[bytes, str] | None:
                 "BMP": ".bmp",
                 "TIFF": ".tiff",
             }.get(source.format or "")
-            if limit == 0:
-                return (payload, suffix) if suffix is not None else None
-            if suffix is not None and len(payload) <= limit:
+            if suffix is None:
+                return None
+            if limit == 0 or len(payload) <= limit:
+                # Preserve source bytes without expanding large originals into
+                # pixel buffers. Only compression needs full image decoding.
+                source.verify()
                 return payload, suffix
             image = source.convert("RGB")
         while True:
