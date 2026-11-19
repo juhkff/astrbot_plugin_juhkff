@@ -13,6 +13,8 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, patch
 
+from aiocqhttp.exceptions import ActionFailed
+
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Plain, Reply
 from astrbot.core.config.default import DEFAULT_CONFIG
@@ -307,6 +309,77 @@ class CommandRoutingTests(IsolatedAsyncioTestCase):
         with patch.object(entry.logger, "exception"):
             await self.dispatch(event)
         self.assertTrue(event.is_stopped())
+        self.assert_no_chat()
+
+    async def test_pixiv_send_failures_report_status_without_retrying_content(self):
+        for message, expected in (
+            (
+                "Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/sendMsg",
+                "尚未确认送达",
+            ),
+            ("发送转发消息失败", "消息发送失败"),
+        ):
+            with self.subTest(message=message):
+                event = self.event("#pixiv月榜")
+                error = ActionFailed(
+                    result={"status": "failed", "retcode": 1200, "message": message}
+                )
+                event.send.side_effect = [error, None]
+                await self.wake(event)
+                with patch.object(entry.logger, "exception"):
+                    await self.dispatch(event)
+                self.assertEqual(event.send.await_count, 2)
+                calls = event.send.await_args_list
+                self.assertEqual(calls[0].args[0].chain[0].text, "pixiv")
+                notice = calls[1].args[0].chain
+                self.assertEqual(len(notice), 1)
+                self.assertIsInstance(notice[0], Plain)
+                self.assertIn(expected, notice[0].text)
+                self.assertTrue(event.is_stopped())
+                self.card.handle.assert_not_awaited()
+                self.assert_no_chat()
+
+    async def test_pixiv_failure_notice_errors_are_contained(self):
+        event = self.event("#pixiv日榜")
+        event.send.side_effect = RuntimeError("send unavailable")
+        await self.wake(event)
+        with patch.object(entry.logger, "exception") as log:
+            await self.dispatch(event)
+        self.assertEqual(event.send.await_count, 2)
+        self.assertEqual(log.call_count, 2)
+        self.assertTrue(event.is_stopped())
+        self.assert_no_chat()
+
+    async def test_pixiv_failure_notice_has_a_bounded_wait(self):
+        event = self.event("#pixiv作品 151134548 第2张")
+        cancelled = asyncio.Event()
+
+        async def send(chain):
+            if chain.chain[0].text == "pixiv":
+                raise TimeoutError("send timeout")
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        event.send.side_effect = send
+        await self.wake(event)
+        with (
+            patch.object(entry, "_PIXIV_FAILURE_NOTICE_TIMEOUT", 0.01),
+            patch.object(entry.logger, "exception"),
+        ):
+            await self.dispatch(event)
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(event.is_stopped())
+        self.assert_no_chat()
+
+    async def test_pixiv_cancelled_send_does_not_send_a_failure_notice(self):
+        event = self.event("#pixiv日榜")
+        event.send.side_effect = asyncio.CancelledError
+        await self.wake(event)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.dispatch(event)
+        event.send.assert_awaited_once()
         self.assert_no_chat()
 
     async def test_already_stopped_and_global_disabled_are_ignored(self):

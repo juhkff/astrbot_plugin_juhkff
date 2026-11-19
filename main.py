@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from collections.abc import AsyncGenerator
@@ -60,6 +61,7 @@ from astrbot.core.pipeline.process_stage.method.agent_request import (  # noqa: 
 
 # 版本号：开发期间固定为初代 0.1.0，不随功能变化调整。
 VERSION = "0.1.0"
+_PIXIV_FAILURE_NOTICE_TIMEOUT = 10.0
 logger = ModuleLogger()
 
 
@@ -226,10 +228,30 @@ class JuhkffPlugin(Star):
                             "[juhkff] Pixiv reply sent: origin=%s",
                             event.unified_msg_origin,
                         )
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         f"[juhkff] Module {mod.key} failed to send a message"
                     )
+                    if mod.key == "pixiv_push" and mod.enabled and self.global_enabled:
+                        # A missing acknowledgement can still arrive late. Report
+                        # the uncertainty without retrying or changing the images.
+                        timed_out = isinstance(exc, TimeoutError) or (
+                            "timeout" in str(exc).casefold()
+                        )
+                        notice = (
+                            "Pixiv 消息发送超时，尚未确认送达，请先检查群内是否已收到。"
+                            if timed_out
+                            else "Pixiv 消息发送失败，请检查 QQ 协议端日志。"
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                event.send(event.plain_result(notice)),
+                                timeout=_PIXIV_FAILURE_NOTICE_TIMEOUT,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "[juhkff] Pixiv send failure notice could not be sent"
+                            )
                 event.stop_event()
                 return
         yield
