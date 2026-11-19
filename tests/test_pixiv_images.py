@@ -34,6 +34,7 @@ class PixivImageTests(IsolatedAsyncioTestCase):
         self.item: pixiv.Illustration = {
             "id": "7",
             "title": "Work",
+            "description": "",
             "author": "Artist",
             "page_count": 1,
             "x_restrict": 0,

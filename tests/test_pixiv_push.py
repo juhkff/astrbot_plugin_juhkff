@@ -69,6 +69,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         return {
             "id": illust_id,
             "title": f"Work {illust_id}",
+            "description": "",
             "author": "Artist",
             "page_count": pages,
             "x_restrict": 0,
@@ -220,6 +221,39 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         assert awaited(fetch) is not None
         self.assertEqual(awaited(fetch).kwargs["allowed_hosts"], {"www.pixiv.net"})
         self.assertTrue(awaited(fetch).kwargs["proxy_resolve"])
+
+    async def test_detail_reads_artist_description_as_plain_text(self):
+        response = {
+            "error": False,
+            "body": {
+                "id": "2",
+                "title": "Title",
+                "userName": "Artist",
+                "pageCount": 1,
+                "urls": {"original": "https://i.pximg.net/2.png"},
+            },
+        }
+        for description, expected in (
+            (None, ""),
+            (42, ""),
+            (
+                "<p>新作 &amp; お知らせ<br />よろしく &lt;3</p>"
+                '<p><a href="https://example.com/?a=1&amp;b=2">詳細</a></p>',
+                "新作 & お知らせ\nよろしく <3\n\n詳細 (https://example.com/?a=1&b=2)",
+            ),
+        ):
+            with self.subTest(description=description):
+                response["body"]["description"] = description
+                with patch.object(
+                    pixiv, "fetch_json", AsyncMock(return_value=response)
+                ):
+                    result = await self.module._fetch_detail("2")
+                self.assertEqual(result["description"], expected)
+                self.assertEqual(result["title"], "Title")
+                self.assertEqual(result["author"], "Artist")
+        response["body"].pop("description")
+        with patch.object(pixiv, "fetch_json", AsyncMock(return_value=response)):
+            self.assertEqual((await self.module._fetch_detail("2"))["description"], "")
 
     async def test_detail_and_pages_reject_foreign_or_private_image_urls(self):
         for url in (

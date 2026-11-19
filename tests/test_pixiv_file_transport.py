@@ -83,6 +83,7 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
         self.work: pixiv.Illustration = {
             "id": "7",
             "title": "Work",
+            "description": "",
             "author": "Artist",
             "page_count": 26,
             "x_restrict": 0,
@@ -203,6 +204,76 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
         self.assertEqual(json.dumps(call.kwargs).count("/artworks/2"), 1)
         self.assertNotIn("base64://", json.dumps(call.kwargs))
         self.assertEqual(self.module._artists["7"]["last_id"], "2")
+
+    async def test_all_entrypoints_translate_once_per_work_in_the_metadata_node(self):
+        self.module.cfg["auto_translate"] = {"enable": True, "language": "中文"}
+        self.work.update({"title": "新作", "description": "よろしく\nお願いします"})
+        context = self.plugin.context
+        context.get_current_chat_provider_id = AsyncMock(return_value="group-model")
+        context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                completion_text=json.dumps(
+                    {"title": "新作品", "description": "请多关照\n谢谢支持"}
+                )
+            )
+        )
+        for entrypoint in (
+            "#pixiv日榜",
+            "#pixiv周榜",
+            "#pixiv月榜",
+            "#pixiv随机",
+            "#pixiv作品 7",
+            "daily_push",
+            "artist_push",
+        ):
+            with self.subTest(entrypoint=entrypoint):
+                self.bot.call_action.reset_mock()
+                context.llm_generate.reset_mock()
+                context.get_current_chat_provider_id.reset_mock()
+                if entrypoint == "daily_push":
+                    await self.module.push_daily_ranking()
+                elif entrypoint == "artist_push":
+                    self.module._artists["7"] = {"last_id": "1", "delivered": {}}
+                    self.module._fetch_ids = AsyncMock(return_value=["1", "2"])
+                    self.assertTrue(await self.module._check_artist("7"))
+                else:
+                    event = cast(
+                        AstrMessageEvent,
+                        SimpleNamespace(
+                            message_str=entrypoint,
+                            is_at_or_wake_command=True,
+                            unified_msg_origin=self.umo,
+                            get_message_type=lambda: MessageType.GROUP_MESSAGE,
+                            get_self_id=lambda: "123",
+                            plain_result=lambda text: MessageChain().message(text),
+                        ),
+                    )
+                    result = await self.module.handle(event)
+                    assert result is not None
+                    await context.send_message(self.umo, result)
+                context.get_current_chat_provider_id.assert_awaited_once_with(self.umo)
+                context.llm_generate.assert_awaited_once()
+                call = context.llm_generate.await_args
+                assert call is not None
+                self.assertEqual(call.kwargs["chat_provider_id"], "group-model")
+                self.assertEqual(
+                    json.loads(call.kwargs["prompt"]),
+                    {
+                        "language": "中文",
+                        "title": "新作",
+                        "description": "よろしく\nお願いします",
+                    },
+                )
+                self.bot.call_action.assert_awaited_once()
+                call = self.bot.call_action.await_args
+                assert call is not None
+                pages = call.kwargs["messages"][0]["data"]["content"]
+                header = pages[0]["data"]["content"][0]["data"]["text"]
+                self.assertIn("新作品\nArtist\n", header)
+                self.assertIn("请多关照\n谢谢支持", header)
+                for page in pages[1:]:
+                    self.assertEqual(len(page["data"]["content"]), 1)
+                    self.assertEqual(page["data"]["content"][0]["type"], "image")
 
     async def test_local_transport_keeps_restricted_filter_and_link_policy(self):
         work = {**self.work, "x_restrict": 1}

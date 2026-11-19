@@ -933,6 +933,28 @@
         "default": true,
         "hint": "开启后可用 #订阅 UID、#取消订阅 UID、日榜、周榜、月榜、随机 [关键词]、作品 ID或链接 [第N张]；简写可带 #、/ 或直接发送。"
       },
+      "auto_translate": {
+        "description": "自动翻译",
+        "type": "object",
+        "hint": "翻译作品标题及画师填写的简介，适用于全部 Pixiv 取图与推送入口。",
+        "items": {
+          "enable": {
+            "description": "启用自动翻译",
+            "type": "bool",
+            "default": false,
+            "hint": "使用接收群当前配置的聊天模型，每个作品调用一次，会增加模型用量和等待时间。超时、模型不可用或翻译失败时发送原文；不修改图片和画师姓名。"
+          },
+          "language": {
+            "description": "翻译语言",
+            "type": "string",
+            "default": "中文",
+            "condition": {
+              "enable": true
+            },
+            "hint": "目标语言，例如中文、英语或日语；留空时使用中文。"
+          }
+        }
+      },
       "filter_r18": {
         "description": "过滤 R18 作品",
         "type": "bool",

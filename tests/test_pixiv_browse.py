@@ -46,7 +46,11 @@ class BrowseHost(browse.PixivBrowseMixin):
         self._get_bot_id = AsyncMock(return_value="123")
         self.scheduler = SimpleNamespace(daily=AsyncMock())
         self.plugin = SimpleNamespace(
-            context=SimpleNamespace(send_message=AsyncMock(return_value=True))
+            context=SimpleNamespace(
+                send_message=AsyncMock(return_value=True),
+                get_current_chat_provider_id=AsyncMock(return_value="group-model"),
+                llm_generate=AsyncMock(),
+            )
         )
 
 
@@ -187,6 +191,100 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 for call in self.host._download.await_args_list
             )
         )
+
+    async def test_translation_disabled_preserves_title_and_artist_description(self):
+        work = {**item(), "title": "新作", "description": "よろしく\nお願いします"}
+        for settings in (None, {"enable": False, "language": "English"}):
+            with self.subTest(settings=settings):
+                self.host.cfg["auto_translate"] = settings
+                result = await self.host._render_items([work], self.umo)
+                caption = at(result).text
+                self.assertIn(
+                    "新作\nArtist\nhttps://www.pixiv.net/artworks/7\n", caption
+                )
+                self.assertIn("よろしく\nお願いします\n", caption)
+        self.host.plugin.context.get_current_chat_provider_id.assert_not_awaited()
+        self.host.plugin.context.llm_generate.assert_not_awaited()
+
+    async def test_translation_languages_and_empty_description(self):
+        self.host.plugin.context.llm_generate.return_value = SimpleNamespace(
+            completion_text='```json\n{"title":"译名","description":"多余说明"}\n```'
+        )
+        work = {**item(), "title": "新作", "description": ""}
+        for settings, expected in (
+            ({"enable": True}, "中文"),
+            ({"enable": True, "language": "  "}, "中文"),
+            ({"enable": True, "language": " English "}, "English"),
+        ):
+            with self.subTest(settings=settings):
+                self.host.cfg["auto_translate"] = settings
+                result = await self.host._render_items([work], self.umo)
+                self.assertIn("译名\nArtist\n", at(result).text)
+                self.assertNotIn("多余说明", at(result).text)
+                request = awaited(self.host.plugin.context.llm_generate).kwargs
+                self.assertEqual(request["chat_provider_id"], "group-model")
+                self.assertEqual(json.loads(request["prompt"])["language"], expected)
+        self.assertEqual(work["title"], "新作")
+
+    async def test_translation_failure_preserves_all_original_text(self):
+        self.host.cfg["auto_translate"] = {"enable": True}
+        work = {**item(), "title": "新作", "description": "よろしく"}
+        context = self.host.plugin.context
+        for completion in (
+            "",
+            "I cannot translate this.",
+            '{"title":"译名"}',
+            '{"title":"译名","description":""}',
+            '{"title":null,"description":"简介"}',
+            '["译名", "简介"]',
+            RuntimeError("model unavailable"),
+        ):
+            with self.subTest(completion=completion):
+                context.llm_generate.side_effect = (
+                    completion if isinstance(completion, Exception) else None
+                )
+                context.llm_generate.return_value = SimpleNamespace(
+                    completion_text=completion
+                )
+                result = await self.host._render_items([work], self.umo)
+                self.assertIn("新作\nArtist\n", at(result).text)
+                self.assertIn("よろしく\n", at(result).text)
+        context.get_current_chat_provider_id.side_effect = RuntimeError("no provider")
+        context.llm_generate.reset_mock()
+        result = await self.host._render_items([work], self.umo)
+        self.assertIn("よろしく\n", at(result).text)
+        context.llm_generate.assert_not_awaited()
+
+    async def test_translation_timeout_covers_provider_lookup_and_generation(self):
+        self.host.cfg["auto_translate"] = {"enable": True}
+        work = {**item(), "description": "Original description"}
+        for stage in ("get_current_chat_provider_id", "llm_generate"):
+            with self.subTest(stage=stage):
+                cancelled = asyncio.Event()
+
+                async def stalled(*args, **kwargs):
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+
+                with (
+                    patch.object(browse, "_TRANSLATION_TIMEOUT", 0.01),
+                    patch.object(
+                        self.host.plugin.context, stage, AsyncMock(side_effect=stalled)
+                    ),
+                ):
+                    result = await self.host._render_items([work], self.umo)
+                self.assertTrue(cancelled.is_set())
+                self.assertIn("Original description", at(result).text)
+                self.assertIsInstance(at(result, 1), Image)
+
+    async def test_translation_cancellation_stops_delivery(self):
+        self.host.cfg["auto_translate"] = {"enable": True}
+        self.host.plugin.context.llm_generate.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await self.host._render_items([item()], self.umo)
+        self.host._download.assert_not_awaited()
 
     async def test_mixed_works_serialize_as_flat_single_images_and_nested_albums(self):
         for transport in ("base64", "file"):

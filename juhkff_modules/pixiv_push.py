@@ -18,6 +18,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import TypedDict
 
@@ -77,9 +78,35 @@ class Illustration(ImagePage):
 
     id: str
     title: str
+    description: str
     author: str
     page_count: int
     x_restrict: int
+
+
+class _DescriptionParser(HTMLParser):
+    """Read visible artist text, preserving line breaks and hyperlink targets."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.link = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"br", "p", "div", "li"}:
+            self.parts.append("\n")
+        elif tag == "a":
+            self.link = dict(attrs).get("href") or ""
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"p", "div", "li"}:
+            self.parts.append("\n")
+        elif tag == "a" and self.link:
+            self.parts.append(f" ({self.link})")
+            self.link = ""
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
 
 
 def _positive_id(value: object) -> str | None:
@@ -686,7 +713,7 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         )
 
     async def _fetch_detail(self, illust_id: str) -> Illustration:
-        """Validate first-page URLs, author, title, and the total page count.
+        """Read artist text and validate first-page URLs and the total page count.
 
         Args:
             illust_id: Newest illustration ID from the artist's profile.
@@ -734,9 +761,14 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         )
         if not regular and not original:
             raise ValueError("Pixiv illustration API returned no image URL")
+        description = body.get("description", "")
+        parser = _DescriptionParser()
+        parser.feed(description if isinstance(description, str) else "")
+        parser.close()
         return {
             "id": illust_id,
             "title": title,
+            "description": "".join(parser.parts).strip(),
             "author": author,
             "page_count": page_count,
             "x_restrict": (
