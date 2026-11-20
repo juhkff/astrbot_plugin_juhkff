@@ -442,8 +442,10 @@ class PixivBrowseMixin:
                 )
                 if type(count := item.get(key)) is int and count >= 0
             )
+            content_label = {1: "【R18】", 2: "【R18-G】"}.get(restriction)
             caption = (
-                (f"排名：#{rank}\n" if rank is not None else "")
+                (f"{content_label}\n" if content_label else "")
+                + (f"排名：#{rank}\n" if rank is not None else "")
                 + f"作品名：{title}\n作者名：{item['author']}\n"
                 + f"作品链接：https://www.pixiv.net/artworks/{item['id']}\n"
                 + (f"{statistics}\n" if statistics else "")

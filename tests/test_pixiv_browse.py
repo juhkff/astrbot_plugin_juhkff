@@ -211,6 +211,48 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 self.assertEqual(serialized.count("收藏量："), 1)
                 self.assertEqual(serialized.count("点赞量："), 1)
 
+    async def test_content_labels_follow_work_rating_in_direct_and_forward_messages(
+        self,
+    ):
+        for restriction, label in ((0, ""), (1, "【R18】"), (2, "【R18-G】")):
+            for pages in (1, 3):
+                for display in ("image", "link"):
+                    with self.subTest(
+                        restriction=restriction, pages=pages, display=display
+                    ):
+                        self.host._content_policy.return_value = (False, display)
+                        result = await self.host._render_items(
+                            [item(pages=pages, restriction=restriction)],
+                            self.umo,
+                            ranks={"7": 4},
+                        )
+                        serialized = json.dumps(
+                            await at(result).to_dict(), ensure_ascii=False
+                        )
+                        for candidate in ("【R18】", "【R18-G】"):
+                            self.assertEqual(
+                                serialized.count(candidate), int(candidate == label)
+                            )
+                        if label:
+                            self.assertIn(label + "\\n排名：#4", serialized)
+                        if pages == 1:
+                            self.assertTrue(
+                                at(result).text.startswith(
+                                    label + "\n" if label else "排名："
+                                )
+                            )
+        result = await self.host._render_items(
+            [
+                item("7", pages=2, restriction=1),
+                item("8", restriction=0),
+                item("9", restriction=2),
+            ],
+            self.umo,
+        )
+        serialized = json.dumps(await at(result).to_dict(), ensure_ascii=False)
+        self.assertEqual(serialized.count("【R18】"), 1)
+        self.assertEqual(serialized.count("【R18-G】"), 1)
+
     async def test_missing_or_invalid_statistics_are_omitted_individually(self):
         for fields in (
             {},
