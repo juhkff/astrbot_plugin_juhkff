@@ -285,7 +285,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         with patch.object(pixiv, "fetch_json", AsyncMock(return_value=response)):
             self.assertEqual((await self.module._fetch_detail("2"))["description"], "")
 
-    async def test_detail_validates_actual_view_count(self):
+    async def test_detail_validates_artwork_statistics(self):
         response = {
             "error": False,
             "body": {
@@ -296,22 +296,29 @@ class PixivPushTests(IsolatedAsyncioTestCase):
                 "urls": {"original": "https://i.pximg.net/2.png"},
             },
         }
-        for value, expected in (
-            (25000, 25000),
-            (0, 0),
-            (-1, 0),
-            (True, 0),
-            (None, 0),
-            ("25000", 0),
+        for api_key, key in (
+            ("viewCount", "view_count"),
+            ("bookmarkCount", "bookmark_count"),
+            ("likeCount", "like_count"),
         ):
-            with self.subTest(value=value):
-                response["body"]["viewCount"] = value
-                with patch.object(
-                    pixiv, "fetch_json", AsyncMock(return_value=response)
-                ):
-                    self.assertEqual(
-                        (await self.module._fetch_detail("2"))["view_count"], expected
-                    )
+            with patch.object(pixiv, "fetch_json", AsyncMock(return_value=response)):
+                self.assertIsNone((await self.module._fetch_detail("2"))[key])
+            for value, expected in (
+                (25000, 25000),
+                (0, 0),
+                (-1, None),
+                (True, None),
+                (None, None),
+                ("25000", None),
+            ):
+                with self.subTest(key=key, value=value):
+                    response["body"][api_key] = value
+                    with patch.object(
+                        pixiv, "fetch_json", AsyncMock(return_value=response)
+                    ):
+                        self.assertEqual(
+                            (await self.module._fetch_detail("2"))[key], expected
+                        )
 
     async def test_detail_and_pages_reject_foreign_or_private_image_urls(self):
         for url in (

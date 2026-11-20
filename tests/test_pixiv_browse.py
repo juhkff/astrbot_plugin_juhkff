@@ -193,6 +193,40 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_statistics_display_once_in_direct_and_forwarded_works(self):
+        for pages, restriction in ((1, 0), (3, 0), (3, 1)):
+            with self.subTest(pages=pages, restriction=restriction):
+                self.host._content_policy.return_value = (False, "link")
+                work = {
+                    **item(pages=pages, restriction=restriction),
+                    "view_count": 12345,
+                    "bookmark_count": 2345,
+                    "like_count": 0,
+                }
+                result = await self.host._render_items([work], self.umo, ranks={"7": 4})
+                serialized = json.dumps(await at(result).to_dict(), ensure_ascii=False)
+                self.assertIn("浏览量：12,345 · 收藏量：2,345 · 点赞量：0", serialized)
+                self.assertIn("排名：#4", serialized)
+                self.assertEqual(serialized.count("浏览量："), 1)
+                self.assertEqual(serialized.count("收藏量："), 1)
+                self.assertEqual(serialized.count("点赞量："), 1)
+
+    async def test_missing_or_invalid_statistics_are_omitted_individually(self):
+        for fields in (
+            {},
+            {"view_count": None, "bookmark_count": -1, "like_count": True},
+            {"view_count": "12345", "bookmark_count": 0},
+        ):
+            with self.subTest(fields=fields):
+                result = await self.host._render_items([{**item(), **fields}], self.umo)
+                caption = at(result).text
+                self.assertNotIn("浏览量：", caption)
+                self.assertNotIn("点赞量：", caption)
+                if fields.get("bookmark_count") == 0:
+                    self.assertIn("收藏量：0", caption)
+                else:
+                    self.assertNotIn("收藏量：", caption)
+
     async def test_translation_disabled_preserves_title_and_artist_description(self):
         work = {**item(), "title": "新作", "description": "よろしく\nお願いします"}
         for settings in (None, {"enable": False, "language": "English"}):

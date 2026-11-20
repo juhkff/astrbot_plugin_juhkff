@@ -433,10 +433,20 @@ class PixivBrowseMixin:
                     )
                 ensure_active()
             rank = (ranks or {}).get(item["id"])
+            statistics = " · ".join(
+                f"{label}：{count:,}"
+                for key, label in (
+                    ("view_count", "浏览量"),
+                    ("bookmark_count", "收藏量"),
+                    ("like_count", "点赞量"),
+                )
+                if type(count := item.get(key)) is int and count >= 0
+            )
             caption = (
                 (f"排名：#{rank}\n" if rank is not None else "")
                 + f"作品名：{title}\n作者名：{item['author']}\n"
                 + f"作品链接：https://www.pixiv.net/artworks/{item['id']}\n"
+                + (f"{statistics}\n" if statistics else "")
                 + (f"作品说明：\n{description}\n" if description else "")
             )
             work_captions[item["id"]] = caption

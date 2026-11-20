@@ -85,7 +85,9 @@ class Illustration(ImagePage):
     author: str
     page_count: int
     x_restrict: int
-    view_count: int
+    view_count: int | None
+    bookmark_count: int | None
+    like_count: int | None
 
 
 class _DescriptionParser(HTMLParser):
@@ -790,7 +792,17 @@ class PixivPushModule(PixivRandomMixin, PixivBrowseMixin, BaseModule):
             "view_count": (
                 body["viewCount"]
                 if type(body.get("viewCount")) is int and body["viewCount"] >= 0
-                else 0
+                else None
+            ),
+            "bookmark_count": (
+                body["bookmarkCount"]
+                if type(body.get("bookmarkCount")) is int and body["bookmarkCount"] >= 0
+                else None
+            ),
+            "like_count": (
+                body["likeCount"]
+                if type(body.get("likeCount")) is int and body["likeCount"] >= 0
+                else None
             ),
             "x_restrict": (
                 body["xRestrict"]
