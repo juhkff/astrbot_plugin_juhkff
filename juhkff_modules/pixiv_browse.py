@@ -284,15 +284,7 @@ class PixivBrowseMixin:
         )
         if not randomized:
             pages = 1
-        self.log.info(
-            "[juhkff] Pixiv browse fetching: mode=%s, search=%s, pages=%s, count=%s",
-            mode,
-            bool(keyword),
-            pages,
-            count,
-        )
         candidates = await self._browse_candidates(mode, pages, keyword)
-        self.log.info("[juhkff] Pixiv browse candidates ready: %s", len(candidates))
         if randomized:
             random.shuffle(candidates)
         selected = []
@@ -416,7 +408,6 @@ class PixivBrowseMixin:
         translate = translation.get("enable", False)
         language = str(translation.get("language") or "").strip() or "中文"
         filter_r18, display = self._content_policy(umo)
-        self.log.info("[juhkff] Pixiv preparing artwork pages: works=%s", len(items))
         for item in items:
             restriction = item.get("x_restrict", -1)
             restricted = restriction != 0
@@ -428,11 +419,6 @@ class PixivBrowseMixin:
             title = item["title"]
             description = item.get("description", "")
             if translate and (title.strip() or description.strip()):
-                self.log.info(
-                    "[juhkff] Pixiv translating artwork text: artwork=%s, language=%s",
-                    item["id"],
-                    language,
-                )
                 try:
                     title, description = await asyncio.wait_for(
                         self._translate_artwork_text(title, description, umo, language),
@@ -460,12 +446,6 @@ class PixivBrowseMixin:
             )
             for index in indices:
                 ensure_active()
-                self.log.info(
-                    "[juhkff] Pixiv preparing page: artwork=%s, page=%s/%s",
-                    item["id"],
-                    index + 1,
-                    item["page_count"],
-                )
                 source = pages[index]
                 if restricted and display == "link":
                     if not source.get("original"):
@@ -509,11 +489,14 @@ class PixivBrowseMixin:
             return None
         if self._content_policy(umo) != (filter_r18, display):
             raise RuntimeError("Pixiv content policy changed during rendering")
-        self.log.info("[juhkff] Pixiv pages ready: items=%s", len(entries))
+        self.log.info(
+            "[juhkff] Pixiv message prepared: works=%s, pages=%s",
+            len(work_captions),
+            len(entries),
+        )
         if len(entries) < 2:
             return MessageChain([component for entry in entries for component in entry])
         if bot_id is None:
-            self.log.info("[juhkff] Pixiv resolving account for merged forwarding")
             bot_id = await self._get_bot_id(umo)
         ensure_active()
         if self._content_policy(umo) != (filter_r18, display):
@@ -561,14 +544,6 @@ class PixivBrowseMixin:
             batch_size += size
         if nodes:
             batches.append(Nodes(nodes))
-        self.log.info(
-            "[juhkff] Pixiv forward batches ready: batches=%s, items=%s, "
-            "transport=%s, estimated_bytes=%s",
-            len(batches),
-            len(entries),
-            "file" if local_files else "base64",
-            sum(entry_sizes) + 1024 * len(batches),
-        )
         return MessageChain(batches)
 
     async def start_browse(self) -> None:

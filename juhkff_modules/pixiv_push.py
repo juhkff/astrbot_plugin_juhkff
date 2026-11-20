@@ -884,20 +884,7 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                     ):
                         return None
                     stage = "read"
-                    started = time.monotonic()
                     try:
-                        self.log.info(
-                            "[juhkff] Pixiv image read started: artwork=%s, page=%s, "
-                            "source=%s, location=%s",
-                            item["id"],
-                            index + 1,
-                            kind,
-                            "cache"
-                            if isinstance(candidate, Path)
-                            else "primary"
-                            if candidate == url
-                            else "mirror",
-                        )
                         if (
                             isinstance(candidate, Path)
                             and candidate.stat().st_size > _MAX_IMAGE_BYTES
@@ -917,14 +904,6 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                                 allowed_hosts=_IMAGE_HOSTS,
                                 proxy_resolve=True,
                             )
-                        )
-                        self.log.info(
-                            "[juhkff] Pixiv image bytes ready: artwork=%s, page=%s, "
-                            "bytes=%s, elapsed=%.1fs",
-                            item["id"],
-                            index + 1,
-                            len(payload),
-                            time.monotonic() - started,
                         )
                         if (
                             self._stopped
@@ -959,14 +938,6 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                             temporary.write_bytes(raw_bytes)
                             temporary.replace(target)
                         if not compatible and (limit == 0 or len(raw_bytes) <= limit):
-                            self.log.info(
-                                "[juhkff] Pixiv image ready: artwork=%s, page=%s, "
-                                "bytes=%s, compressed=False, elapsed=%.1fs",
-                                item["id"],
-                                index + 1,
-                                len(raw_bytes),
-                                time.monotonic() - started,
-                            )
                             return target
                         stage = "compatibility" if compatible else "compression"
                         derivative = folder / (
@@ -1000,15 +971,6 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                                 ):
                                     return None
                                 return derivative
-                        self.log.info(
-                            "[juhkff] Pixiv image processing started: artwork=%s, "
-                            "page=%s, bytes=%s, limit=%s, compatible=%s",
-                            item["id"],
-                            index + 1,
-                            len(raw_bytes),
-                            limit,
-                            compatible,
-                        )
                         prepared = await asyncio.wait_for(
                             asyncio.to_thread(
                                 _prepare_image, raw_bytes, limit, compatible=compatible
@@ -1039,14 +1001,6 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                             temporary = Path(output.name)
                         temporary.chmod(0o644)
                         temporary.replace(target)
-                        self.log.info(
-                            "[juhkff] Pixiv image ready: artwork=%s, page=%s, "
-                            "bytes=%s, compressed=True, elapsed=%.1fs",
-                            item["id"],
-                            index + 1,
-                            len(compressed),
-                            time.monotonic() - started,
-                        )
                         return target
                     except asyncio.TimeoutError:
                         self.log.warning(
