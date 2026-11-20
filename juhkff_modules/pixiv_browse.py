@@ -573,6 +573,7 @@ class PixivBrowseMixin:
             groups = daily.get("groups", [])
             if not isinstance(groups, list):
                 return
+            self.log.info("[juhkff] Pixiv daily ranking push triggered")
             for origin in dict.fromkeys(
                 group for group in groups if isinstance(group, str)
             ):

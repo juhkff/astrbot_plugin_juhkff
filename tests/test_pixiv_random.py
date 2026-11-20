@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from copy import deepcopy
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
@@ -24,6 +25,7 @@ class RandomHost(random_push.PixivRandomMixin):
         self._stopped = False
         self.enabled = True
         self.proxy = ""
+        self.tz_name = "Asia/Shanghai"
         self.log = Mock()
         self.log.scope.side_effect = nullcontext
         self._random_push_recent: dict[str, str] = {}
@@ -55,7 +57,10 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
 
     async def test_first_push_waits_and_inclusive_delay_boundaries(self):
-        for minutes in (1, 120):
+        for minutes, expected_time in (
+            (1, "2026-11-21 00:00:00+08:00"),
+            (120, "2026-11-21 01:59:00+08:00"),
+        ):
             host = RandomHost()
             waits = []
 
@@ -64,10 +69,23 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
                 if len(waits) == 1:
                     host.plugin.context.send_message.assert_not_awaited()
                     self.assertEqual(host._fetch_detail.await_count, 0)
+                    host.log.info.assert_called_once_with(
+                        "[juhkff] Pixiv random push scheduled: next=%s, wait_minutes=%s",
+                        expected_time,
+                        minutes,
+                    )
                 else:
+                    host.log.info.assert_any_call(
+                        "[juhkff] Pixiv random push triggered"
+                    )
                     raise asyncio.CancelledError
 
             with (
+                patch.object(
+                    random_push,
+                    "now",
+                    return_value=datetime(2026, 11, 20, 15, 59, tzinfo=timezone.utc),
+                ),
                 patch.object(
                     random_push.random, "randint", return_value=minutes
                 ) as rng,
@@ -274,7 +292,7 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
             [ORIGIN, OTHER],
         )
         host.log.exception.assert_called_once()
-        host.log.info.assert_called_once_with(
+        host.log.info.assert_any_call(
             "[juhkff] Pixiv random push completed: groups=%s", 1
         )
 
@@ -293,6 +311,7 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
                 await self.host.run_random_push()
         self.fetch.assert_not_awaited()
         self.assertEqual(waits, 2)
+        self.assertEqual(self.host.log.info.call_count, 1)
 
     async def test_cancel_during_detail_propagates(self):
         self.host._fetch_detail.side_effect = asyncio.CancelledError

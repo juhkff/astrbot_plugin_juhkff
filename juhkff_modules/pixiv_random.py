@@ -6,9 +6,10 @@ import asyncio
 import random
 import re
 from copy import deepcopy
+from datetime import timedelta
 from typing import Any
 
-from .common import fetch_json
+from .common import fetch_json, get_tz, now
 
 
 class PixivRandomMixin:
@@ -38,7 +39,17 @@ class PixivRandomMixin:
             if type(upper) is not int or upper < 1:
                 upper = 120
             lower, upper = sorted((lower, upper))
-            await asyncio.sleep(random.randint(lower, upper) * 60)
+            minutes = random.randint(lower, upper)
+            if settings.get("enable", False):
+                next_run = (now("UTC") + timedelta(minutes=minutes)).astimezone(
+                    get_tz(self.tz_name)
+                )
+                self.log.info(
+                    "[juhkff] Pixiv random push scheduled: next=%s, wait_minutes=%s",
+                    next_run.isoformat(sep=" ", timespec="seconds"),
+                    minutes,
+                )
+            await asyncio.sleep(minutes * 60)
             if self._stopped or not self.enabled:
                 return
             settings = deepcopy(self.cfg.get("random_push") or {})
@@ -47,6 +58,7 @@ class PixivRandomMixin:
             groups = settings.get("groups", [])
             if not isinstance(groups, list):
                 continue
+            self.log.info("[juhkff] Pixiv random push triggered")
             sent = 0
             for origin in dict.fromkeys(
                 group

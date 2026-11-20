@@ -111,6 +111,7 @@
 - 手动取图在发送阶段报错时，会尝试发送一条文字提示；协议端超时会提示「尚未确认送达」，避免把缺少成功回执直接当作未发送。提示消息本身最多等待 10 秒，发送失败仍记录日志。不会自动重发图片；请先检查实际接收情况，避免重复消息。画师订阅仍仅在框架确认发送成功后推进进度。
 - 可选填写敏感配置 `cookie`：只需输入 Pixiv Cookie 中 `PHPSESSID` 的值，无需添加 `PHPSESSID=` 前缀；也兼容原先的完整 Cookie。默认留空，以未登录方式访问；凭据不在消息中回显。
 - 开启 Pixiv「打印日志」时，启动或重载后会在后台校验一次登录状态：`Pixiv login: valid` 表示登录有效，`Cookie invalid` 表示凭据无效，`network error; status undetermined` 表示网络异常、暂无法判断；服务器拒绝或响应异常则记录 `unexpected server response; status undetermined`。未填写时记录使用未登录请求；关闭日志则跳过校验。校验不阻塞启动、不影响榜单或订阅，日志不包含凭据或响应正文。
+- 随机发图在每次抽取间隔后记录 `Pixiv random push scheduled`，包含下次任务时间 `next`（按全局时区显示并带 UTC 偏移）和等待分钟数 `wait_minutes`；等待结束后记录 `Pixiv random push triggered`，表示开始筛选和推送，实际送达时间还取决于下载、处理与发送耗时。这两条日志遵循 Pixiv「打印日志」开关，关闭随机发图后不再打印。日榜自动推送开始处理时也记录 `Pixiv daily ranking push triggered`，同样遵循日志开关。
 - 访问 Pixiv 需代理时，在「全局设置 → 网络代理」填写 HTTP 代理地址。配置后，Pixiv API 与图片域名由该代理解析，兼容 Clash 的域名规则及本机 DNS 异常；未配置时仍直接访问。
 - 画师订阅获取作品、下载或发送失败时，默认依次等待 2、4、6…分钟；基础间隔可调，成功后恢复正常检查。任务按分钟调度，实际可能略晚。
 
