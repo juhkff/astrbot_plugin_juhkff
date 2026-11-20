@@ -110,20 +110,23 @@ class JuhkffPlugin(Star):
 
     # ------------------------------------------------------------ 生命周期
 
+    async def initialize(self) -> None:
+        """Start enabled modules on every plugin load, including hot reloads."""
+        await self._ensure_started()
+
     @filter.on_astrbot_loaded()
     async def _on_astrbot_loaded(self) -> None:
-        """AstrBot 初始化完成（此时 Context/DB/定时器都已就绪）后启动各模块。"""
+        """Ensure startup without duplicating jobs registered by initialize."""
         await self._ensure_started()
 
     async def _ensure_started(self) -> None:
-        """启动所有启用模块（幂等）。
+        """Start enabled modules once, isolating each module's startup failure.
 
-        只启动 `enabled` 为真的模块：它们会在 `start()` 里注册定时任务、
-        初始化状态文件等；单个模块失败不影响其它模块。
-
-        为什么除了 `on_astrbot_loaded` 还要在消息入口再调一次：那个钩子只在
-        AstrBot **进程启动**时触发，WebUI 热重载插件（保存配置、禁用再启用）
-        不会重新触发。不补这一下，热重载后定时任务不会注册。
+        AstrBot calls initialize on both initial loading and hot reloads, with
+        the database and cron manager already available. Module startup does
+        not require initialized providers or platform adapters; delivery accesses
+        them later. The loaded hook and message handler remain
+        idempotent fallbacks and never register a second set of jobs.
         """
         if self._started:
             return
