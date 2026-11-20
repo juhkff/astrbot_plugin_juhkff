@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -72,7 +73,97 @@ class PixivImageTests(IsolatedAsyncioTestCase):
         with Image.open(io.BytesIO(prepared[0])) as image:
             image.load()
 
+    def test_compatibility_reencodes_static_formats_even_below_the_limit(self):
+        for format in ("PNG", "JPEG", "BMP", "WEBP"):
+            buffer = io.BytesIO()
+            Image.new("RGB", (32, 16), "red").save(buffer, format=format)
+            payload = buffer.getvalue()
+            with Image.open(io.BytesIO(payload)) as source:
+                expected = io.BytesIO()
+                source.convert("RGB").save(
+                    expected, format="JPEG", quality=90, subsampling=0, optimize=True
+                )
+            for limit in (0, 65536):
+                with self.subTest(format=format, limit=limit):
+                    prepared = pixiv._prepare_image(payload, limit, compatible=True)
+                    assert prepared is not None
+                    self.assertEqual(prepared, (expected.getvalue(), ".jpg"))
+                    with Image.open(io.BytesIO(prepared[0])) as image:
+                        self.assertEqual(image.format, "JPEG")
+                        self.assertEqual(image.size, (32, 16))
+
+    def test_compatibility_applies_exif_orientation_and_white_transparency(self):
+        source = Image.new("RGB", (32, 16), "red")
+        source.paste("blue", (16, 0, 32, 16))
+        exif = Image.Exif()
+        exif[274] = 6
+        buffer = io.BytesIO()
+        source.save(buffer, format="JPEG", exif=exif)
+        prepared = pixiv._prepare_image(buffer.getvalue(), 0, compatible=True)
+        assert prepared is not None
+        with Image.open(io.BytesIO(prepared[0])) as image:
+            self.assertEqual(image.size, (16, 32))
+            self.assertIn(image.getexif().get(274), (None, 1))
+            top, bottom = image.getpixel((8, 4)), image.getpixel((8, 28))
+            self.assertGreater(top[0], 240)
+            self.assertGreater(bottom[2], 240)
+
+        for mode in ("RGBA", "LA", "P"):
+            with self.subTest(mode=mode):
+                source = Image.new("RGBA", (32, 16), (0, 0, 0, 0))
+                source.paste((255, 0, 0, 255), (16, 0, 32, 16))
+                if mode == "LA":
+                    source = source.convert("LA")
+                elif mode == "P":
+                    source = source.convert("P")
+                buffer = io.BytesIO()
+                source.save(buffer, format="PNG")
+                prepared = pixiv._prepare_image(buffer.getvalue(), 0, compatible=True)
+                assert prepared is not None
+                with Image.open(io.BytesIO(prepared[0])) as image:
+                    self.assertEqual(image.mode, "RGB")
+                    self.assertTrue(all(c >= 250 for c in image.getpixel((4, 8))))
+                    self.assertLess(min(image.getpixel((28, 8))), 100)
+
+    def test_compatibility_preserves_animation_and_rejects_oversized_multiframe(self):
+        frames = [Image.new("RGB", (16, 16), color) for color in ("red", "blue")]
+        for format, suffix in (("GIF", ".gif"), ("PNG", ".png"), ("TIFF", ".tiff")):
+            buffer = io.BytesIO()
+            frames[0].save(
+                buffer, format=format, save_all=True, append_images=frames[1:]
+            )
+            payload = buffer.getvalue()
+            for limit in (0, len(payload), len(payload) + 1):
+                with self.subTest(format=format, limit=limit):
+                    prepared = pixiv._prepare_image(payload, limit, compatible=True)
+                    self.assertEqual(prepared, (payload, suffix))
+                    assert prepared is not None
+                    with Image.open(io.BytesIO(prepared[0])) as image:
+                        self.assertEqual(image.n_frames, 2)
+            self.assertIsNone(
+                pixiv._prepare_image(payload, len(payload) - 1, compatible=True)
+            )
+
+    def test_compatibility_compresses_and_scales_to_positive_limits(self):
+        buffer = io.BytesIO()
+        Image.effect_noise((128, 128), 100).convert("RGB").save(buffer, format="PNG")
+        payload = buffer.getvalue()
+        for limit in (4096, 512):
+            with self.subTest(limit=limit):
+                prepared = pixiv._prepare_image(payload, limit, compatible=True)
+                assert prepared is not None
+                self.assertEqual(prepared[1], ".jpg")
+                self.assertLessEqual(len(prepared[0]), limit)
+                with Image.open(io.BytesIO(prepared[0])) as image:
+                    image.load()
+                    if limit == 512:
+                        self.assertLess(image.width, 128)
+                        self.assertLess(image.height, 128)
+        self.assertIsNone(pixiv._prepare_image(payload, 1, compatible=True))
+        self.assertIsNone(pixiv._prepare_image(b"not an image", 0, compatible=True))
+
     async def test_download_timeout_can_fall_back_to_a_working_mirror(self):
+        self.module.cfg["image_format_compatibility"] = False
         with (
             patch.object(
                 pixiv,
@@ -82,7 +173,7 @@ class PixivImageTests(IsolatedAsyncioTestCase):
             patch.object(
                 pixiv.asyncio,
                 "to_thread",
-                AsyncMock(side_effect=lambda fn, *args: fn(*args)),
+                AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)),
             ),
         ):
             path = await self.module._download(self.item, self.item, 0)
@@ -93,16 +184,128 @@ class PixivImageTests(IsolatedAsyncioTestCase):
             [self.item["original"], "https://i.pixiv.re/7.png"],
         )
 
+    async def test_compatibility_default_derives_from_original_and_reuses_valid_cache(
+        self,
+    ):
+        self.assertNotIn("image_format_compatibility", self.module.cfg)
+        original = self.folder / "pixiv" / "images" / "7_p0" / "original.png"
+        original.parent.mkdir(parents=True)
+        original.write_bytes(self.payload)
+        with (
+            patch.object(pixiv, "fetch_bytes", AsyncMock()) as fetch,
+            patch.object(
+                pixiv, "_prepare_image", wraps=pixiv._prepare_image
+            ) as prepare,
+        ):
+            path = await self.module._download(self.item, self.item, 0)
+            assert path is not None
+            self.assertNotEqual(path, original)
+            self.assertEqual(path.suffix, ".jpg")
+            self.assertIn(hashlib.sha256(self.payload).hexdigest(), path.name)
+            self.assertEqual(original.read_bytes(), self.payload)
+            with Image.open(path) as image:
+                self.assertEqual(image.format, "JPEG")
+                self.assertEqual(image.size, (8, 8))
+            conversions = sum(
+                bool(call.kwargs.get("compatible")) for call in prepare.call_args_list
+            )
+            self.assertEqual(conversions, 1)
+            self.assertEqual(await self.module._download(self.item, self.item, 0), path)
+            self.assertEqual(
+                sum(bool(c.kwargs.get("compatible")) for c in prepare.call_args_list),
+                conversions,
+            )
+            path.write_bytes(b"corrupted derivative")
+            rebuilt = await self.module._download(self.item, self.item, 0)
+            self.assertEqual(rebuilt, path)
+            with Image.open(path) as image:
+                image.verify()
+            self.assertEqual(
+                sum(bool(c.kwargs.get("compatible")) for c in prepare.call_args_list),
+                conversions + 1,
+            )
+            fetch.assert_not_awaited()
+        self.assertEqual(original.read_bytes(), self.payload)
+
+    async def test_compatibility_caches_already_matching_jpeg_bytes(self):
+        prepared = pixiv._prepare_image(self.payload, 0, compatible=True)
+        assert prepared is not None
+        payload = prepared[0]
+        self.assertEqual(pixiv._prepare_image(payload, 0, compatible=True), prepared)
+        with (
+            patch.object(pixiv, "fetch_bytes", AsyncMock(return_value=payload)),
+            patch.object(
+                pixiv, "_prepare_image", wraps=pixiv._prepare_image
+            ) as prepare,
+        ):
+            first = await self.module._download(self.item, self.item, 0)
+            assert first is not None
+            self.assertNotEqual(first.name, "original.jpg")
+            self.assertEqual(first.read_bytes(), payload)
+            self.assertEqual(
+                await self.module._download(self.item, self.item, 0), first
+            )
+            self.assertEqual(
+                sum(bool(c.kwargs.get("compatible")) for c in prepare.call_args_list), 1
+            )
+
+    async def test_compatibility_cache_invalidates_when_source_or_limit_changes(self):
+        with patch.object(
+            pixiv, "fetch_bytes", AsyncMock(return_value=self.payload)
+        ) as fetch:
+            first = await self.module._download(self.item, self.item, 0)
+            assert first is not None
+            original = first.parent / "original.png"
+            self.assertEqual(original.read_bytes(), self.payload)
+            buffer = io.BytesIO()
+            Image.new("RGB", (8, 8), "blue").save(buffer, format="PNG")
+            changed = buffer.getvalue()
+            original.write_bytes(changed)
+            second = await self.module._download(self.item, self.item, 0)
+            assert second is not None
+            self.assertNotEqual(first, second)
+            self.assertIn(hashlib.sha256(changed).hexdigest(), second.name)
+            with Image.open(second) as image:
+                self.assertGreater(image.getpixel((4, 4))[2], 240)
+            self.module.cfg["max_image_mb"] = 1
+            third = await self.module._download(self.item, self.item, 0)
+            assert third is not None
+            self.assertNotEqual(second, third)
+            self.assertIn(str(1024 * 1024), third.name)
+            self.assertEqual(original.read_bytes(), changed)
+            fetch.assert_awaited_once()
+
+    async def test_source_only_compatibility_ignores_limit_and_preserves_source(self):
+        self.module.cfg.update(image_format_compatibility=True, max_image_mb=0.000001)
+        with patch.object(
+            pixiv, "fetch_bytes", AsyncMock(return_value=self.payload)
+        ) as fetch:
+            path = await self.module._download(
+                self.item, self.item, 0, source_only=True
+            )
+        assert path is not None
+        self.assertEqual(path.suffix, ".jpg")
+        self.assertEqual((path.parent / "original.png").read_bytes(), self.payload)
+        with Image.open(path) as image:
+            self.assertEqual(image.size, (8, 8))
+        fetch.assert_awaited_once()
+        self.assertEqual(fetch.await_args.args[0], self.item["original"])
+
     async def test_processing_timeouts_stop_without_queueing_alternate_images(self):
-        for stage in ("validation", "compression"):
+        for index, stage in enumerate(("validation", "compression", "compatibility")):
             with self.subTest(stage=stage):
+                self.module.cfg["image_format_compatibility"] = stage == "compatibility"
                 self.module.cfg["max_image_mb"] = (
-                    0 if stage == "validation" else 0.000001
+                    0.000001 if stage == "compression" else 0
                 )
                 cancelled = asyncio.Event()
 
-                async def stalled_worker(fn, payload, limit):
-                    if stage == "compression" and limit == 0:
+                async def stalled_worker(fn, payload, limit, **kwargs):
+                    if (
+                        stage != "validation"
+                        and limit == 0
+                        and not kwargs.get("compatible")
+                    ):
                         return payload, ".png"
                     try:
                         await asyncio.Event().wait()
@@ -112,7 +315,7 @@ class PixivImageTests(IsolatedAsyncioTestCase):
                 # Keep each case independent from the cached original of the other.
                 item: pixiv.Illustration = {
                     **self.item,
-                    "id": "7" if stage == "validation" else "8",
+                    "id": str(7 + index),
                 }
                 with (
                     patch.object(pixiv, "_IMAGE_PROCESS_TIMEOUT", 0.01),

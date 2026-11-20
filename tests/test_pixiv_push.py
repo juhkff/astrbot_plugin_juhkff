@@ -287,6 +287,7 @@ class PixivPushTests(IsolatedAsyncioTestCase):
                         await self.module._fetch_pages(self.item(pages=2))
 
     async def test_original_bytes_and_download_bound_survive_cache_reuse(self):
+        self.module.cfg["image_format_compatibility"] = False
         item = self.item()
         with patch.object(
             pixiv, "fetch_bytes", AsyncMock(return_value=self.payload)
@@ -727,7 +728,11 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         self,
     ):
         self.module.cfg.update(
-            {"cookie": "PHPSESSID=fixture-secret", "max_image_mb": 0.000001}
+            {
+                "cookie": "PHPSESSID=fixture-secret",
+                "max_image_mb": 0.000001,
+                "image_format_compatibility": False,
+            }
         )
         item = self.item()
         self.assertEqual(

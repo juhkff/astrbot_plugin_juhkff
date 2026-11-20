@@ -11,11 +11,13 @@ all new works, and successful groups never receive the same work again on retry.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import io
 import math
 import os
 import re
+import tempfile
 import time
 from collections.abc import Callable
 from html.parser import HTMLParser
@@ -836,14 +838,14 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         source_only: bool = False,
         delivery_active: Callable[[], bool] | None = None,
     ) -> Path | None:
-        """Cache a page's original bytes and optionally derive a compressed copy.
+        """Cache source bytes and derive a reusable image for delivery.
 
         Args:
             item: Validated illustration metadata.
             page: Source URLs returned for this page.
             index: Zero-based page index.
             user_id: Artist whose subscription must remain active, if applicable.
-            source_only: Preserve source bytes without preview fallback or compression.
+            source_only: Download only originals and ignore the compression threshold.
             delivery_active: Optional subscription identity and membership guard.
 
         Returns:
@@ -854,6 +856,7 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
             if not math.isfinite(limit_mb) or limit_mb < 0:
                 raise ValueError("Invalid Pixiv compression threshold")
             limit = int(limit_mb * 1024 * 1024)
+            compatible = self.cfg.get("image_format_compatibility", True)
             folder = data_dir() / "pixiv" / "images" / f"{item['id']}_p{index}"
             folder.mkdir(parents=True, exist_ok=True)
             # Source bytes stay separate from regular previews, old flat caches,
@@ -955,7 +958,7 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                             temporary = target.with_suffix(suffix + ".tmp")
                             temporary.write_bytes(raw_bytes)
                             temporary.replace(target)
-                        if limit == 0 or len(raw_bytes) <= limit:
+                        if not compatible and (limit == 0 or len(raw_bytes) <= limit):
                             self.log.info(
                                 "[juhkff] Pixiv image ready: artwork=%s, page=%s, "
                                 "bytes=%s, compressed=False, elapsed=%.1fs",
@@ -965,17 +968,51 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                                 time.monotonic() - started,
                             )
                             return target
-                        stage = "compression"
+                        stage = "compatibility" if compatible else "compression"
+                        derivative = folder / (
+                            f"{kind}_jpeg_v1_{hashlib.sha256(raw_bytes).hexdigest()}_{limit}.jpg"
+                            if compatible
+                            else f"{kind}_{limit}.jpg"
+                        )
+                        if compatible and derivative.is_file():
+                            cached = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    _prepare_image, derivative.read_bytes(), 0
+                                ),
+                                timeout=_IMAGE_PROCESS_TIMEOUT,
+                            )
+                            if (
+                                cached is not None
+                                and cached[1] == ".jpg"
+                                and (limit == 0 or len(cached[0]) <= limit)
+                            ):
+                                if (
+                                    self._stopped
+                                    or not self.enabled
+                                    or (
+                                        user_id is not None
+                                        and not self._groups(user_id)
+                                    )
+                                    or (
+                                        delivery_active is not None
+                                        and not delivery_active()
+                                    )
+                                ):
+                                    return None
+                                return derivative
                         self.log.info(
-                            "[juhkff] Pixiv image compression started: artwork=%s, "
-                            "page=%s, bytes=%s, limit=%s",
+                            "[juhkff] Pixiv image processing started: artwork=%s, "
+                            "page=%s, bytes=%s, limit=%s, compatible=%s",
                             item["id"],
                             index + 1,
                             len(raw_bytes),
                             limit,
+                            compatible,
                         )
                         prepared = await asyncio.wait_for(
-                            asyncio.to_thread(_prepare_image, raw_bytes, limit),
+                            asyncio.to_thread(
+                                _prepare_image, raw_bytes, limit, compatible=compatible
+                            ),
                             timeout=_IMAGE_PROCESS_TIMEOUT,
                         )
                         if (
@@ -988,9 +1025,19 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
                         if prepared is None:
                             continue
                         compressed, suffix = prepared
-                        target = folder / f"{kind}_{limit}{suffix}"
-                        temporary = target.with_suffix(suffix + ".tmp")
-                        temporary.write_bytes(compressed)
+                        if compatible and suffix != ".jpg":
+                            # Animated images keep every frame and their source format.
+                            return target
+                        target = derivative.with_suffix(suffix)
+                        with tempfile.NamedTemporaryFile(
+                            dir=folder,
+                            prefix=target.stem + "_",
+                            suffix=".tmp",
+                            delete=False,
+                        ) as output:
+                            output.write(compressed)
+                            temporary = Path(output.name)
+                        temporary.chmod(0o644)
                         temporary.replace(target)
                         self.log.info(
                             "[juhkff] Pixiv image ready: artwork=%s, page=%s, "
@@ -1178,12 +1225,15 @@ def _mirror(url: str) -> str:
     return f"{MIRROR}/{match.group(1)}" if match else ""
 
 
-def _prepare_image(payload: bytes, limit: int) -> tuple[bytes, str] | None:
-    """Validate original bytes, compressing only for an explicit positive limit.
+def _prepare_image(
+    payload: bytes, limit: int, *, compatible: bool = False
+) -> tuple[bytes, str] | None:
+    """Validate source bytes or encode a static JPEG for compatible delivery.
 
     Args:
         payload: Downloaded or cached image bytes.
-        limit: Maximum encoded size in bytes, or zero to preserve original bytes.
+        limit: Maximum encoded size in bytes, or zero for no size limit.
+        compatible: Re-encode static images as JPEG even below the size limit.
 
     Returns:
         Validated bytes and their file suffix, or None when validation/sizing fails.
@@ -1192,6 +1242,7 @@ def _prepare_image(payload: bytes, limit: int) -> tuple[bytes, str] | None:
         return None
     try:
         from PIL import Image as PILImage
+        from PIL import ImageOps
 
         with PILImage.open(io.BytesIO(payload)) as source:
             suffix = {
@@ -1205,12 +1256,30 @@ def _prepare_image(payload: bytes, limit: int) -> tuple[bytes, str] | None:
             }.get(source.format or "")
             if suffix is None:
                 return None
-            if limit == 0 or len(payload) <= limit:
-                # Preserve source bytes without expanding large originals into
-                # pixel buffers. Only compression needs full image decoding.
+            if compatible and getattr(source, "n_frames", 1) > 1:
+                if limit > 0 and len(payload) > limit:
+                    return None
                 source.verify()
                 return payload, suffix
-            image = source.convert("RGB")
+            if not compatible and (limit == 0 or len(payload) <= limit):
+                # Validation alone does not expand the source into pixel buffers.
+                source.verify()
+                return payload, suffix
+            if compatible:
+                oriented = ImageOps.exif_transpose(source)
+                if "A" in oriented.getbands() or "transparency" in oriented.info:
+                    rgba = oriented.convert("RGBA")
+                    image = PILImage.new("RGB", rgba.size, "white")
+                    image.paste(rgba, mask=rgba.getchannel("A"))
+                else:
+                    image = oriented.convert("RGB")
+            else:
+                image = source.convert("RGB")
+        if compatible:
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=90, subsampling=0, optimize=True)
+            if limit == 0 or buffer.tell() <= limit:
+                return buffer.getvalue(), ".jpg"
         while True:
             for quality in (88, 78, 68, 58, 48, 38):
                 buffer = io.BytesIO()
