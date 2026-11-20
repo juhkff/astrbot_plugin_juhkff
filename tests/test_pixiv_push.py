@@ -76,6 +76,37 @@ class PixivPushTests(IsolatedAsyncioTestCase):
             "regular": f"https://i.pximg.net/regular/{illust_id}_p0.png",
         }
 
+    async def test_random_push_task_starts_only_when_enabled_and_stops_cleanly(self):
+        for enabled in (False, True):
+            self.module.cfg["random_push"] = {"enable": enabled}
+            started = asyncio.Event()
+
+            async def run_random_push():
+                started.set()
+                await asyncio.Event().wait()
+
+            with (
+                patch.object(self.module, "check", AsyncMock()),
+                patch.object(self.module, "_check_login", AsyncMock()),
+                patch.object(
+                    self.module,
+                    "run_random_push",
+                    AsyncMock(side_effect=run_random_push),
+                ) as run,
+            ):
+                await self.module.start()
+                task = self.module._random_push_task
+                if enabled:
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    self.assertIsNotNone(task)
+                else:
+                    self.assertIsNone(task)
+                    run.assert_not_called()
+                await self.module.stop()
+                self.assertIsNone(self.module._random_push_task)
+                if task is not None:
+                    self.assertTrue(task.cancelled())
+
     async def test_cache_cleanup_schedule_defaults_and_custom_time(self):
         for configured, expected in ((None, "00:00"), ("02:30", "02:30")):
             if configured is not None:
@@ -253,6 +284,34 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         response["body"].pop("description")
         with patch.object(pixiv, "fetch_json", AsyncMock(return_value=response)):
             self.assertEqual((await self.module._fetch_detail("2"))["description"], "")
+
+    async def test_detail_validates_actual_view_count(self):
+        response = {
+            "error": False,
+            "body": {
+                "id": "2",
+                "title": "Title",
+                "userName": "Artist",
+                "pageCount": 1,
+                "urls": {"original": "https://i.pximg.net/2.png"},
+            },
+        }
+        for value, expected in (
+            (25000, 25000),
+            (0, 0),
+            (-1, 0),
+            (True, 0),
+            (None, 0),
+            ("25000", 0),
+        ):
+            with self.subTest(value=value):
+                response["body"]["viewCount"] = value
+                with patch.object(
+                    pixiv, "fetch_json", AsyncMock(return_value=response)
+                ):
+                    self.assertEqual(
+                        (await self.module._fetch_detail("2"))["view_count"], expected
+                    )
 
     async def test_detail_and_pages_reject_foreign_or_private_image_urls(self):
         for url in (

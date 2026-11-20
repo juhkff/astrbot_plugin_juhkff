@@ -43,6 +43,7 @@ from .common import (
 )
 from .http_utils import validate_url
 from .pixiv_browse import PixivBrowseMixin
+from .pixiv_random import PixivRandomMixin
 
 PROFILE_URL = "https://www.pixiv.net/ajax/user/{user_id}/profile/all?lang=en"
 DETAIL_URL = "https://www.pixiv.net/ajax/illust/{illust_id}"
@@ -84,6 +85,7 @@ class Illustration(ImagePage):
     author: str
     page_count: int
     x_restrict: int
+    view_count: int
 
 
 class _DescriptionParser(HTMLParser):
@@ -128,7 +130,7 @@ def _positive_id(value: object) -> str | None:
     return text.lstrip("0") or None
 
 
-class PixivPushModule(PixivBrowseMixin, BaseModule):
+class PixivPushModule(PixivRandomMixin, PixivBrowseMixin, BaseModule):
     key = "pixiv_push"
     title = "Pixiv 订阅与浏览"
 
@@ -144,6 +146,8 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         self._stopped = False
         self._baseline_task: asyncio.Task[None] | None = None
         self._login_task: asyncio.Task[None] | None = None
+        self._random_push_task: asyncio.Task[None] | None = None
+        self._random_push_recent: dict[str, str] = {}
         self._checks: set[asyncio.Task[None]] = set()
 
     def help_entries(self) -> list[tuple[str, str]]:
@@ -153,7 +157,10 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
             ("#pixiv日榜 / #pixiv周榜 / #pixiv月榜", "查看榜单；数量由配置决定"),
             ("#pixiv随机 [关键词]", "搜索结果随机取图，留空从排行榜池抽取"),
             ("#pixiv作品 ID或链接 [第N张]", "查看作品全部分页或指定页"),
-            ("（自动）", "推送画师新作，可按配置定时推送日榜；单项直发，多项合并转发"),
+            (
+                "（自动）",
+                "推送画师新作，可定时推送日榜或按配置的随机间隔向指定群推送热门作品；单项直发，多项合并转发",
+            ),
         ]
         if self.cfg.get("allow_prefixless", True):
             entries = [
@@ -377,6 +384,10 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
             1, self.check, "pixiv-check", tz_name=self.tz_name
         )
         await self.start_browse()
+        if (self.cfg.get("random_push") or {}).get("enable", False):
+            self._random_push_task = asyncio.create_task(
+                self.run_random_push(), name="juhkff-pixiv-random-push"
+            )
         await self.scheduler.daily(
             self.cfg.get("cache_cleanup_time", "00:00"),
             self.cleanup_image_cache,
@@ -392,6 +403,8 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         """Cancel and await startup work and any in-flight scheduled checks."""
         self._stopped = True
         tasks = set(self._checks)
+        if self._random_push_task is not None:
+            tasks.add(self._random_push_task)
         if self._login_task is not None:
             tasks.add(self._login_task)
         if self._baseline_task is not None:
@@ -404,6 +417,7 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._checks.clear()
+        self._random_push_task = None
         self._baseline_task = None
         self._login_task = None
 
@@ -773,6 +787,11 @@ class PixivPushModule(PixivBrowseMixin, BaseModule):
             "description": "".join(parser.parts).strip(),
             "author": author,
             "page_count": page_count,
+            "view_count": (
+                body["viewCount"]
+                if type(body.get("viewCount")) is int and body["viewCount"] >= 0
+                else 0
+            ),
             "x_restrict": (
                 body["xRestrict"]
                 if type(body.get("xRestrict")) is int and body["xRestrict"] in (0, 1, 2)

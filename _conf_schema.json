@@ -1103,6 +1103,43 @@
           }
         }
       },
+      "random_push": {
+        "description": "随机发图",
+        "type": "object",
+        "items": {
+          "enable": {
+            "description": "启用随机发图",
+            "type": "bool",
+            "default": false,
+            "hint": "开启后按下限和上限随机等待，再向接收群各推送一部作品，每轮结束后重新随机计时。使用 Pixiv 发现推荐池，需配置有效 Cookie；不从排行榜选图。修改后重载插件生效。"
+          },
+          "min_minutes": {
+            "description": "随机等待下限（分钟）",
+            "type": "int",
+            "default": 1,
+            "hint": "正整数，包含端点，默认 1。上下限相同时为固定间隔；下限大于上限时自动交换。非正整数按默认值处理。"
+          },
+          "max_minutes": {
+            "description": "随机等待上限（分钟）",
+            "type": "int",
+            "default": 120,
+            "hint": "正整数，包含端点，默认 120，可设置为超过 120 的分钟数。非正整数按默认值处理；每轮结束后按配置范围重新随机。"
+          },
+          "groups": {
+            "description": "随机发图接收群",
+            "type": "list",
+            "default": [],
+            "_special": "umo",
+            "hint": "选择接收随机作品的群，可多选；留空不发图。每群发送一部作品的全部分页，沿用全局及分群内容规则、自动翻译、图片处理和传递方式。"
+          },
+          "min_views": {
+            "description": "最低浏览量",
+            "type": "int",
+            "default": 10000,
+            "hint": "仅从实际浏览量达到此值的候选作品中随机选择，默认 10000。没有符合热度和本群内容规则的作品时跳过本轮，等待下一次随机间隔，不回退到排行榜。"
+          }
+        }
+      },
       "subscriptions": {
         "description": "画师订阅列表",
         "type": "template_list",
