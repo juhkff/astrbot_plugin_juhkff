@@ -17,7 +17,7 @@ from PIL import Image as PILImage
 from pixiv_test_utils import page_nodes
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import Image, Nodes, Plain
+from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.platform import MessageType
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -180,7 +180,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.host._get_bot_id.assert_not_awaited()
         result = await self.host._render_items([item(pages=3)], self.umo)
         self.assertIsInstance(at(result), Nodes)
-        self.assertEqual(len(at(result).nodes), 1)
+        self.assertEqual(len(at(result).nodes), 4)
         self.assertEqual(len(page_nodes(at(result).nodes)), 3)
         self.assertEqual(
             [call.args[2] for call in self.host._download.await_args_list[-3:]],
@@ -575,14 +575,41 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         result = await self.host._render_items([item(restriction=1)], self.umo)
         self.assertIsInstance(at(result, 1), Image)
 
+    async def test_single_remaining_work_is_flat_in_every_transport_batch(self):
+        for transport in ("file", "base64"):
+            with self.subTest(transport=transport):
+                self.host.cfg["image_transport"] = transport
+                with patch.object(browse, "_FORWARD_BATCH_BYTES", 3000):
+                    result = must(
+                        await self.host._render_items(
+                            [item("6", restriction=1), item("7", pages=9)], self.umo
+                        )
+                    )
+                if transport == "base64":
+                    self.assertGreater(len(result.chain), 1)
+                else:
+                    self.assertEqual(len(result.chain), 1)
+                pages = []
+                for batch in result.chain:
+                    assert isinstance(batch, Nodes)
+                    for node in batch.nodes:
+                        self.assertFalse(
+                            any(isinstance(part, Node) for part in node.content)
+                        )
+                    serialized = json.dumps(await batch.to_dict(), ensure_ascii=False)
+                    self.assertEqual(serialized.count("/artworks/7"), 1)
+                    self.assertNotIn("/artworks/6", serialized)
+                    pages.extend(page_nodes(batch.nodes))
+                self.assertEqual(len(pages), 9)
+
     async def test_failed_download_raises_and_all_pages_preserve_original_rank(self):
         result = await self.host._render_items(
             [item(pages=4)], self.umo, ranks={"7": 19}
         )
-        self.assertEqual(len(at(result).nodes), 1)
+        self.assertEqual(len(at(result).nodes), 5)
         nodes = page_nodes(at(result).nodes)
         self.assertEqual(len(nodes), 4)
-        header = at(result).nodes[0].content[0].content[0]
+        header = at(result).nodes[0].content[0]
         self.assertIsInstance(header, Plain)
         self.assertIn("排名：#19", header.text)
         self.assertNotRegex(header.text, r"第\s*\d+/\d+\s*张")
@@ -602,7 +629,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.assertIsInstance(at(reply, 1), Image)
         self.assertEqual(awaited(self.host._download).args[2], 1)
         reply = await self.host.handle_browse(event("#pixiv作品 7"))
-        self.assertEqual(len(at(reply).nodes), 1)
+        self.assertEqual(len(at(reply).nodes), 4)
         self.assertEqual(len(page_nodes(at(reply).nodes)), 3)
         reply = await self.host.handle_browse(event("#pixiv作品 7 第4张"))
         self.assertIn("超出范围", at(reply).text)

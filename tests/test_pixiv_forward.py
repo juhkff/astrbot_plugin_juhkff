@@ -86,7 +86,9 @@ class PixivForwardTests(IsolatedAsyncioTestCase):
                 nodes = result.chain[0]
                 assert isinstance(nodes, Nodes)
                 self.assertEqual(len(page_nodes(nodes.nodes)), count)
-                self.assertEqual(len(nodes.nodes), 1 if "作品" in command else 10)
+                self.assertEqual(
+                    len(nodes.nodes), count + 1 if "作品" in command else 10
+                )
                 self.assertTrue(
                     all(node.uin == sender for node in page_nodes(nodes.nodes))
                 )
@@ -147,7 +149,7 @@ class PixivForwardTests(IsolatedAsyncioTestCase):
             self.assertEqual(call.args[0], origin)
             nodes = call.args[1].chain[0]
             self.assertIsInstance(nodes, Nodes)
-            self.assertEqual(len(nodes.nodes), 1)
+            self.assertEqual(len(nodes.nodes), 3)
             self.assertEqual(len(page_nodes(nodes.nodes)), 2)
             self.assertTrue(all(node.uin == sender for node in page_nodes(nodes.nodes)))
         action.assert_not_awaited()

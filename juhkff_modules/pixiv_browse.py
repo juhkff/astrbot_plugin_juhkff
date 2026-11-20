@@ -374,7 +374,7 @@ class PixivBrowseMixin:
         delivery_active: Callable[[], bool] | None = None,
         bot_id: str | None = None,
     ) -> MessageChain | None:
-        """Render works as outer nodes, nesting the pages of multi-image works.
+        """Render works, nesting albums only when multiple works are displayed.
 
         Args:
             items: Validated host details in display order.
@@ -556,6 +556,14 @@ class PixivBrowseMixin:
             batch_size += size
         if nodes:
             batches.append(Nodes(nodes))
+        if len(set(entry_work_ids)) == 1:
+            for batch in batches:
+                if isinstance(batch, Nodes) and len(batch.nodes) == 1:
+                    content = batch.nodes[0].content
+                    if all(isinstance(part, Node) for part in content):
+                        batch.nodes = [
+                            part for part in content if isinstance(part, Node)
+                        ]
         return MessageChain(batches)
 
     async def start_browse(self) -> None:
