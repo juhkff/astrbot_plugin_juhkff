@@ -93,6 +93,70 @@ class PluginLifecycleTests(IsolatedAsyncioTestCase):
         self.assertFalse(jobs["pixiv-daily-ranking"]["persistent"])
         self.assertIsNotNone(self.plugin.modules["pixiv_push"]._random_push_task)
 
+    async def test_ranking_monitor_registers_baselines_and_cancels_inflight_on_stop(
+        self,
+    ):
+        self.config["pixiv_push"]["ranking"]["monitor"] = {
+            "enable": True,
+            "mode": "daily",
+            "pages": 10,
+            "check_minutes": 30,
+            "groups": ["test:GroupMessage:1"],
+        }
+        plugin = self.make_plugin()
+        module = plugin.modules["pixiv_push"]
+        self.context.send_message = AsyncMock(return_value=True)
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def pending(*args):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+
+        with patch.object(
+            module, "_browse_candidates", AsyncMock(return_value=[("1", 1)])
+        ) as candidates:
+            await plugin.initialize()
+            baseline_tasks = [
+                task
+                for task in module._checks
+                if task.get_name() == "juhkff-pixiv-ranking-baseline"
+            ]
+            await asyncio.gather(*baseline_tasks)
+            candidates.assert_awaited_once_with("daily", 10)
+            self.assertEqual(module._ranking_monitor_ids, {"1"})
+            self.context.send_message.assert_not_awaited()
+            jobs = {
+                call.kwargs["name"].rsplit(":", 1)[-1]: call.kwargs
+                for call in self.cron.add_basic_job.await_args_list
+            }
+            self.assertEqual(
+                set(jobs),
+                {
+                    "pixiv-check",
+                    "pixiv-daily-ranking",
+                    "pixiv-ranking-monitor",
+                    "pixiv-cache-cleanup",
+                },
+            )
+            self.assertEqual(
+                jobs["pixiv-ranking-monitor"]["cron_expression"], "*/30 * * * *"
+            )
+            self.assertEqual(jobs["pixiv-ranking-monitor"]["timezone"], "Asia/Shanghai")
+            candidates.side_effect = pending
+            task = asyncio.create_task(module.check_ranking_updates())
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertIn(task, module._checks)
+            await plugin.terminate()
+            self.assertTrue(task.cancelled())
+            self.assertTrue(cancelled.is_set())
+            self.assertEqual(module._checks, set())
+            self.context.send_message.assert_not_awaited()
+            self.assertEqual(self.cron.delete_job.await_count, 4)
+
     async def test_loaded_hook_and_concurrent_fallback_do_not_duplicate_jobs(self):
         await asyncio.gather(
             self.plugin.initialize(),

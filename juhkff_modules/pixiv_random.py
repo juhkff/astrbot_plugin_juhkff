@@ -9,7 +9,9 @@ from copy import deepcopy
 from datetime import timedelta
 from typing import Any
 
-from .common import fetch_json, get_tz, now
+from .common import fetch_json, get_tz, now, save_json
+
+_RANDOM_HISTORY_LIMIT = 200
 
 
 class PixivRandomMixin:
@@ -127,7 +129,8 @@ class PixivRandomMixin:
         if not isinstance(rows, list):
             raise ValueError("Pixiv discovery omitted its artwork collection")
         candidates = []
-        seen = set()
+        recent = self._random_push_recent.get(origin, [])
+        seen = set(recent)
         for row in rows:
             if not isinstance(row, dict) or row.get("illustType") == 2:
                 continue
@@ -136,9 +139,15 @@ class PixivRandomMixin:
             iid = str(row.get("id", ""))
             if not re.fullmatch(r"[0-9]+", iid) or not (iid := iid.lstrip("0")):
                 continue
-            if iid not in seen and iid != self._random_push_recent.get(origin):
+            if iid not in seen:
                 seen.add(iid)
                 candidates.append(iid)
+        if not candidates:
+            self.log.info(
+                "[juhkff] Pixiv random push skipped: no unseen candidates, origin=%s",
+                origin,
+            )
+            return 0
         random.shuffle(candidates)
         for iid in candidates[:12]:
             if not delivery_active():
@@ -167,10 +176,22 @@ class PixivRandomMixin:
                 return 0
             if chain is None:
                 continue
-            sent = await self.plugin.context.send_message(origin, chain)
-            if sent is False:
-                raise RuntimeError("Pixiv random destination is unavailable")
-            if delivery_active():
-                self._random_push_recent[origin] = iid
-            return 1
+            async with self._push_history_lock:
+                if not delivery_active():
+                    return 0
+                recent = self._random_push_recent.get(origin, [])
+                if iid in recent:
+                    continue
+                sent = await self.plugin.context.send_message(origin, chain)
+                if sent is False:
+                    raise RuntimeError("Pixiv random destination is unavailable")
+                # Remember confirmed sends even if settings changed during delivery.
+                self._random_push_recent[origin] = (recent + [iid])[
+                    -_RANDOM_HISTORY_LIMIT:
+                ]
+                try:
+                    save_json(self._random_push_history_path, self._random_push_recent)
+                except Exception:
+                    self.log.exception("[juhkff] Failed to save Pixiv push history")
+                return 1
         return 0

@@ -107,6 +107,68 @@ class PixivPushTests(IsolatedAsyncioTestCase):
                 if task is not None:
                     self.assertTrue(task.cancelled())
 
+    async def test_random_history_survives_new_module_and_process_owner(self):
+        from juhkff_modules import pixiv_random as random_push
+
+        origin = self.groups[0]
+        self.module.cfg["random_push"] = {"enable": True, "groups": [origin]}
+        with (
+            patch.object(
+                random_push,
+                "fetch_json",
+                AsyncMock(
+                    return_value={"body": {"thumbnails": {"illust": [{"id": "7"}]}}}
+                ),
+            ),
+            patch.object(
+                self.module,
+                "_fetch_detail",
+                AsyncMock(
+                    return_value={"id": "7", "view_count": 10000, "x_restrict": 0}
+                ),
+            ),
+            patch.object(
+                self.module, "_render_items", AsyncMock(return_value="rendered")
+            ),
+        ):
+            self.assertEqual(
+                await self.module._push_random_group(
+                    origin, self.module.cfg["random_push"]
+                ),
+                1,
+            )
+        self.assertTrue(self.module._random_push_history_path.is_file())
+        replacement = pixiv.PixivPushModule(self.plugin)
+        replacement._owner = "new-process"
+        self.modules.append(replacement)
+        with (
+            patch.object(replacement, "check", AsyncMock()),
+            patch.object(replacement, "_check_login", AsyncMock()),
+            patch.object(replacement, "run_random_push", AsyncMock()),
+        ):
+            await replacement.start()
+        self.assertEqual(replacement._random_push_recent, {origin: ["7"]})
+
+    async def test_random_history_validates_loaded_ids_and_bounds(self):
+        origin = self.groups[0]
+        pixiv.save_json(
+            self.module._random_push_history_path,
+            {
+                origin: [None, True, "bad", "0", "0007", "7"] + list(range(100, 310)),
+                "invalid": ["7"],
+                self.groups[1]: "7",
+            },
+        )
+        with (
+            patch.object(self.module, "check", AsyncMock()),
+            patch.object(self.module, "_check_login", AsyncMock()),
+        ):
+            await self.module.start()
+        self.assertEqual(
+            self.module._random_push_recent,
+            {origin: [str(i) for i in range(110, 310)]},
+        )
+
     async def test_cache_cleanup_schedule_defaults_and_custom_time(self):
         for configured, expected in ((None, "00:00"), ("02:30", "02:30")):
             if configured is not None:

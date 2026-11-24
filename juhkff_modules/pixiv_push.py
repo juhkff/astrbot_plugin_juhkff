@@ -43,7 +43,8 @@ from .common import (
 )
 from .http_utils import validate_url
 from .pixiv_browse import PixivBrowseMixin
-from .pixiv_random import PixivRandomMixin
+from .pixiv_random import _RANDOM_HISTORY_LIMIT, PixivRandomMixin
+from .pixiv_ranking_monitor import PixivRankingMonitorMixin
 
 PROFILE_URL = "https://www.pixiv.net/ajax/user/{user_id}/profile/all?lang=en"
 DETAIL_URL = "https://www.pixiv.net/ajax/illust/{illust_id}"
@@ -132,7 +133,9 @@ def _positive_id(value: object) -> str | None:
     return text.lstrip("0") or None
 
 
-class PixivPushModule(PixivRandomMixin, PixivBrowseMixin, BaseModule):
+class PixivPushModule(
+    PixivRandomMixin, PixivBrowseMixin, PixivRankingMonitorMixin, BaseModule
+):
     key = "pixiv_push"
     title = "Pixiv 订阅与浏览"
 
@@ -149,7 +152,9 @@ class PixivPushModule(PixivRandomMixin, PixivBrowseMixin, BaseModule):
         self._baseline_task: asyncio.Task[None] | None = None
         self._login_task: asyncio.Task[None] | None = None
         self._random_push_task: asyncio.Task[None] | None = None
-        self._random_push_recent: dict[str, str] = {}
+        self._random_push_recent: dict[str, list[str]] = {}
+        self._push_history_lock = asyncio.Lock()
+        self._random_push_history_path = data_dir() / "pixiv_random_history.json"
         self._checks: set[asyncio.Task[None]] = set()
 
     def help_entries(self) -> list[tuple[str, str]]:
@@ -325,6 +330,23 @@ class PixivPushModule(PixivRandomMixin, PixivBrowseMixin, BaseModule):
 
     async def start(self) -> None:
         """Restore this process's progress or establish fresh restart baselines."""
+        history = load_json(self._random_push_history_path, {})
+        self._random_push_recent = {}
+        if isinstance(history, dict):
+            for origin, ids in history.items():
+                if (
+                    not isinstance(origin, str)
+                    or not re.fullmatch(r"[^:\s]+:GroupMessage:[^:\s]+", origin)
+                    or not isinstance(ids, list)
+                ):
+                    continue
+                recent = list(
+                    dict.fromkeys(
+                        iid for value in ids if (iid := _positive_id(value)) is not None
+                    )
+                )[-_RANDOM_HISTORY_LIMIT:]
+                if recent:
+                    self._random_push_recent[origin] = recent
         self._state_path = data_dir() / "pixiv_subscriptions.json"
         raw = load_json(self._state_path, {})
         self._artists = {}
@@ -386,6 +408,7 @@ class PixivPushModule(PixivRandomMixin, PixivBrowseMixin, BaseModule):
             1, self.check, "pixiv-check", tz_name=self.tz_name
         )
         await self.start_browse()
+        await self.start_ranking_monitor()
         if (self.cfg.get("random_push") or {}).get("enable", False):
             self._random_push_task = asyncio.create_task(
                 self.run_random_push(), name="juhkff-pixiv-random-push"

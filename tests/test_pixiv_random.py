@@ -28,7 +28,9 @@ class RandomHost(random_push.PixivRandomMixin):
         self.tz_name = "Asia/Shanghai"
         self.log = Mock()
         self.log.scope.side_effect = nullcontext
-        self._random_push_recent: dict[str, str] = {}
+        self._push_history_lock = asyncio.Lock()
+        self._random_push_recent: dict[str, list[str]] = {}
+        self._random_push_history_path = "unused-history.json"
         self._api_headers = Mock(return_value={})
         self._content_policy = Mock(return_value=(True, "link"))
         self._fetch_detail = AsyncMock(
@@ -51,6 +53,9 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
         )
         patcher = patch.object(random_push, "fetch_json", self.fetch)
         patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(random_push, "save_json")
+        self.save = patcher.start()
         self.addCleanup(patcher.stop)
         patcher = patch.object(random_push.random, "shuffle")
         self.shuffle = patcher.start()
@@ -175,7 +180,7 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
             render.args, ([{"id": "5", "view_count": 10000, "x_restrict": 0}], ORIGIN)
         )
         self.assertTrue(render.kwargs["delivery_active"]())
-        self.assertEqual(self.host._random_push_recent, {ORIGIN: "5"})
+        self.assertEqual(self.host._random_push_recent, {ORIGIN: ["5"]})
 
     async def test_bounded_details_without_popularity_fallback(self):
         self.fetch.return_value["body"]["thumbnails"]["illust"] = [
@@ -320,7 +325,7 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
         self.host.plugin.context.send_message.assert_not_awaited()
 
     async def test_previous_work_and_ugoira_are_not_requested(self):
-        self.host._random_push_recent[ORIGIN] = "7"
+        self.host._random_push_recent[ORIGIN] = ["7"]
         self.fetch.return_value["body"]["thumbnails"]["illust"].extend(
             [{"id": "8", "illustType": 2}, {"id": "9", "xRestrict": 1}]
         )
@@ -328,6 +333,134 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
             await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
         )
         self.host._fetch_detail.assert_not_awaited()
+
+    async def test_history_prevents_nonconsecutive_repeats_and_exhaustion(self):
+        self.fetch.return_value["body"]["thumbnails"]["illust"] = [
+            {"id": "7"},
+            {"id": "8"},
+            {"id": "9"},
+        ]
+        for expected in ("7", "8", "9"):
+            self.assertEqual(
+                await self.host._push_random_group(
+                    ORIGIN, self.host.cfg["random_push"]
+                ),
+                1,
+            )
+            self.assertEqual(self.host._random_push_recent[ORIGIN][-1], expected)
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
+        )
+        self.assertEqual(self.host._fetch_detail.await_count, 3)
+        self.assertEqual(self.host.plugin.context.send_message.await_count, 3)
+        self.assertEqual(self.save.call_count, 3)
+
+    async def test_history_is_bounded_and_independent_between_groups(self):
+        self.host._random_push_recent[ORIGIN] = [str(i) for i in range(100, 300)]
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(
+            self.host._random_push_recent[ORIGIN],
+            [str(i) for i in range(101, 300)] + ["7"],
+        )
+        self.host.cfg["random_push"]["groups"].append(OTHER)
+        self.assertEqual(
+            await self.host._push_random_group(OTHER, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(self.host._random_push_recent[OTHER], ["7"])
+
+    async def test_unsuccessful_render_or_delivery_does_not_update_history(self):
+        self.host._render_items.return_value = None
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
+        )
+        self.host._render_items.return_value = "rendered"
+        for failure in (False, RuntimeError("send failed"), asyncio.CancelledError()):
+            with self.subTest(failure=failure):
+                send = self.host.plugin.context.send_message
+                send.side_effect = (
+                    failure if isinstance(failure, BaseException) else None
+                )
+                send.return_value = failure
+                with self.assertRaises((RuntimeError, asyncio.CancelledError)):
+                    await self.host._push_random_group(
+                        ORIGIN, self.host.cfg["random_push"]
+                    )
+                self.assertEqual(self.host._random_push_recent, {})
+                self.save.assert_not_called()
+
+    async def test_history_save_failure_retains_memory_and_success(self):
+        self.save.side_effect = OSError("disk full")
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(self.host._random_push_recent[ORIGIN], ["7"])
+        self.host.log.exception.assert_called_once()
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
+        )
+
+    async def test_history_added_during_render_skips_duplicate_send(self):
+        async def render(*args, **kwargs):
+            async with self.host._push_history_lock:
+                self.host._random_push_recent[ORIGIN] = ["7"]
+            return "rendered"
+
+        self.host._render_items.side_effect = render
+        result = await asyncio.wait_for(
+            self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(result, 0)
+        self.host.plugin.context.send_message.assert_not_awaited()
+        self.save.assert_not_called()
+        self.assertEqual(self.host._random_push_recent[ORIGIN], ["7"])
+
+    async def test_settings_revoked_while_waiting_for_history_lock_skip_send(self):
+        rendered = asyncio.Event()
+
+        async def render(*args, **kwargs):
+            rendered.set()
+            return "rendered"
+
+        self.host._render_items.side_effect = render
+        async with self.host._push_history_lock:
+            task = asyncio.create_task(
+                self.host._push_random_group(
+                    ORIGIN, deepcopy(self.host.cfg["random_push"])
+                )
+            )
+            try:
+                await asyncio.wait_for(rendered.wait(), 1)
+                self.host.cfg["random_push"]["enable"] = False
+            except BaseException:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+        self.assertEqual(await asyncio.wait_for(task, 1), 0)
+        self.host.plugin.context.send_message.assert_not_awaited()
+        self.assertEqual(self.host._random_push_recent, {})
+        self.save.assert_not_called()
+
+    async def test_success_merges_latest_history_after_render(self):
+        self.host._random_push_recent[ORIGIN] = ["old"]
+
+        async def render(*args, **kwargs):
+            async with self.host._push_history_lock:
+                self.host._random_push_recent[ORIGIN] = ["old", "monitor-work"]
+            return "rendered"
+
+        self.host._render_items.side_effect = render
+        result = await asyncio.wait_for(
+            self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            self.host._random_push_recent[ORIGIN], ["old", "monitor-work", "7"]
+        )
+        self.save.assert_called_once_with(
+            self.host._random_push_history_path, self.host._random_push_recent
+        )
 
     async def test_invalid_discovery_fails_closed_and_detail_errors_continue(self):
         self.fetch.return_value = {"error": False, "body": {"recommendedIllusts": []}}
