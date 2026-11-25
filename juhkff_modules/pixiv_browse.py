@@ -7,6 +7,7 @@ import json
 import random
 import re
 from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -23,6 +24,17 @@ from astrbot.api.message_components import (
 from astrbot.api.platform import MessageType
 
 from .common import fetch_json
+
+_PROCESSING_GUARD: ContextVar[Callable[[], None] | None] = ContextVar(
+    "pixiv_processing_guard", default=None
+)
+
+
+def _ensure_processing_current() -> None:
+    guard = _PROCESSING_GUARD.get()
+    if guard is not None:
+        guard()
+
 
 _COMMANDS = ("pixiv日榜", "pixiv周榜", "pixiv月榜", "pixiv随机", "pixiv作品")
 _FORWARD_BATCH_BYTES = 16 * 1024 * 1024
@@ -373,6 +385,7 @@ class PixivBrowseMixin:
         """
         context = self.plugin.context
         provider_id = await context.get_current_chat_provider_id(umo)
+        _ensure_processing_current()
         response = await context.llm_generate(
             chat_provider_id=provider_id,
             system_prompt=(
@@ -453,6 +466,7 @@ class PixivBrowseMixin:
             if layout
             else ""
         )
+        _ensure_processing_current()
         response = await context.llm_generate(
             chat_provider_id=provider_id,
             image_urls=[str(image)],
@@ -507,6 +521,7 @@ class PixivBrowseMixin:
                 type(exc).__name__,
                 exc,
             )
+            _ensure_processing_current()
             return None, await self._translate_image_content(
                 image, umo, language, provider_id
             )
@@ -524,6 +539,7 @@ class PixivBrowseMixin:
             )
             if re.sub(r"\s+", "", region_text) != re.sub(r"\s+", "", translated):
                 raise ValueError("Pixiv layout does not cover the full translation")
+            _ensure_processing_current()
             rendered = await asyncio.to_thread(
                 render_translation, image, regions, font_path
             )
@@ -590,12 +606,15 @@ class PixivBrowseMixin:
         content_timeout = max(
             30, _bounded(content_translation.get("timeout_seconds"), 120, 300)
         )
-        if (
-            translate_content
-            and getattr(self, "_content_translation_slots", None) is None
-        ):
-            # Share provider capacity across concurrent destinations and render calls.
-            self._content_translation_slots = asyncio.Semaphore(2)
+        # Snapshot capacity once: replacing a live semaphore bypasses its limit.
+        if getattr(self, "_pixiv_processing_concurrency", None) is None:
+            self._pixiv_processing_concurrency = _bounded(
+                self.cfg.get("processing_concurrency"), 10, 32
+            )
+        if getattr(self, "_pixiv_processing_slots", None) is None:
+            self._pixiv_processing_slots = asyncio.Semaphore(
+                self._pixiv_processing_concurrency
+            )
         content_language = (
             str(content_translation.get("language") or "").strip() or "中文"
         )
@@ -604,24 +623,33 @@ class PixivBrowseMixin:
         restricted_work_ids = set()
         if ranking_sections:
             items = sorted(items, key=lambda work: work.get("x_restrict", -1) != 0)
-        for item in items:
-            restriction = item.get("x_restrict", -1)
+        works = [
+            item
+            for item in items
+            if item.get("x_restrict", -1) in (0, 1, 2)
+            and not (item.get("x_restrict", -1) != 0 and filter_r18)
+        ]
+        if not works:
+            ensure_active()
+            return None
+        results: list[list[tuple[list, int] | None]] = [[] for _ in works]
+        failed: set[int] = set()
+        queue: asyncio.Queue[tuple[int, int | None]] = asyncio.Queue()
+        prepared: dict[int, tuple[list, str]] = {}
+        for position in range(len(works)):
+            queue.put_nowait((position, None))
+
+        def ensure_current() -> None:
+            ensure_active()
+            if self._content_policy(umo) != (filter_r18, display):
+                raise RuntimeError("Pixiv content policy changed during rendering")
+
+        async def prepare_work(position: int) -> None:
+            item = works[position]
+            restriction = item["x_restrict"]
             restricted = restriction != 0
-            if restriction not in (0, 1, 2) or (restricted and filter_r18):
-                continue
-            ensure_active()
-            try:
-                pages = await self._fetch_pages(item)
-            except Exception:
-                ensure_active()
-                if failed_work_ids is None:
-                    raise
-                failed_work_ids.add(item["id"])
-                self.log.exception(
-                    "[juhkff] Pixiv artwork pages failed: artwork=%s", item["id"]
-                )
-                continue
-            ensure_active()
+            pages = await self._fetch_pages(item)
+            ensure_current()
             title = item["title"]
             description = item.get("description", "")
             if translate and (title.strip() or description.strip()):
@@ -637,7 +665,7 @@ class PixivBrowseMixin:
                         item["id"],
                         type(exc).__name__,
                     )
-                ensure_active()
+                ensure_current()
             rank = (ranks or {}).get(item["id"])
             statistics = " · ".join(
                 f"{label}：{count:,}"
@@ -664,170 +692,182 @@ class PixivBrowseMixin:
             indices = (
                 [requested_page] if requested_page is not None else range(len(pages))
             )
+            prepared[position] = (pages, caption)
+            results[position] = [None] * len(pages)
+            for index in indices:
+                queue.put_nowait((position, index))
 
-            async def render_page(index: int) -> tuple[list, int]:
-                ensure_active()
-                source = pages[index]
-                image = None
-                if restricted and display == "link":
-                    if not source.get("original"):
-                        raise RuntimeError(
-                            "Pixiv restricted page omitted its original URL"
-                        )
-                    content = [Plain(caption + source["original"] + "\n")]
-                    entry_size = len(json.dumps(content[0].text)) + 512
+        async def render_page(position: int, index: int) -> tuple[list, int] | None:
+            item = works[position]
+            restricted = item["x_restrict"] != 0
+            pages, caption = prepared[position]
+            ensure_current()
+            source = pages[index]
+            image = None
+            if restricted and display == "link":
+                if not source.get("original"):
+                    raise RuntimeError("Pixiv restricted page omitted its original URL")
+                content = [Plain(caption + source["original"] + "\n")]
+                entry_size = len(json.dumps(content[0].text)) + 512
+            else:
+                options: dict[str, Any] = {"source_only": True} if restricted else {}
+                if delivery_active is not None:
+                    options["delivery_active"] = delivery_active
+                image = await self._download(
+                    item, source, index, user_id=None, **options
+                )
+                ensure_current()
+                if position in failed:
+                    return None
+                if image is None:
+                    raise RuntimeError("Pixiv artwork page download failed")
+                if local_files:
+                    file_uri = image.resolve(strict=True).as_uri()
+                    content = [Plain(caption), OneBotFileImage(file=file_uri)]
+                    entry_size = (
+                        len(json.dumps(file_uri)) + len(json.dumps(caption)) + 512
+                    )
                 else:
-                    options: dict[str, Any] = (
-                        {"source_only": True} if restricted else {}
+                    content = [Plain(caption), Image.fromFileSystem(str(image))]
+                    # OneBot expands local images to base64 inside each request.
+                    # Account for that expansion and escaped text before grouping.
+                    entry_size = (
+                        4 * ((image.stat().st_size + 2) // 3)
+                        + len(json.dumps(caption))
+                        + 512
                     )
-                    if delivery_active is not None:
-                        options["delivery_active"] = delivery_active
-                    image = await self._download(
-                        item, source, index, user_id=None, **options
-                    )
-                    ensure_active()
+            if translate_content:
+                try:
                     if image is None:
-                        raise RuntimeError("Pixiv artwork page download failed")
-                    if local_files:
-                        file_uri = image.resolve(strict=True).as_uri()
-                        content = [Plain(caption), OneBotFileImage(file=file_uri)]
-                        entry_size = (
-                            len(json.dumps(file_uri)) + len(json.dumps(caption)) + 512
+                        options = {"source_only": True}
+                        if delivery_active is not None:
+                            options["delivery_active"] = delivery_active
+                        image = await self._download(
+                            item, source, index, user_id=None, **options
                         )
-                    else:
-                        content = [Plain(caption), Image.fromFileSystem(str(image))]
-                        # OneBot expands local images to base64 inside each request.
-                        # Account for that expansion and escaped text before grouping.
-                        entry_size = (
-                            4 * ((image.stat().st_size + 2) // 3)
-                            + len(json.dumps(caption))
-                            + 512
+                    ensure_current()
+                    if position in failed:
+                        return None
+                    if image is None:
+                        raise ValueError("Pixiv image translation has no local image")
+                    if content_translation.get("mode", "text") == "overlay" and not (
+                        restricted and display == "link"
+                    ):
+                        rendered, translated = await asyncio.wait_for(
+                            self._typeset_image_content(
+                                image,
+                                umo,
+                                content_language,
+                                content_provider,
+                                str(content_translation.get("font_path") or "").strip(),
+                            ),
+                            timeout=content_timeout,
                         )
-                if translate_content:
-                    try:
-                        if image is None:
-                            options = {"source_only": True}
-                            if delivery_active is not None:
-                                options["delivery_active"] = delivery_active
-                            image = await self._download(
-                                item, source, index, user_id=None, **options
-                            )
-                        ensure_active()
-                        if self._content_policy(umo) != (filter_r18, display):
-                            raise RuntimeError(
-                                "Pixiv content policy changed during rendering"
-                            )
-                        if image is None:
-                            raise ValueError(
-                                "Pixiv image translation has no local image"
-                            )
-                        async with self._content_translation_slots:
-                            ensure_active()
-                            if self._content_policy(umo) != (filter_r18, display):
-                                raise RuntimeError(
-                                    "Pixiv content policy changed during rendering"
+                        ensure_current()
+                        if rendered is not None:
+                            if local_files:
+                                file_uri = rendered.resolve(strict=True).as_uri()
+                                content[1] = OneBotFileImage(file=file_uri)
+                                entry_size = (
+                                    len(json.dumps(file_uri))
+                                    + len(json.dumps(caption))
+                                    + 512
                                 )
-                            if content_translation.get(
-                                "mode", "text"
-                            ) == "overlay" and not (restricted and display == "link"):
-                                rendered, translated = await asyncio.wait_for(
-                                    self._typeset_image_content(
-                                        image,
-                                        umo,
-                                        content_language,
-                                        content_provider,
-                                        str(
-                                            content_translation.get("font_path") or ""
-                                        ).strip(),
-                                    ),
-                                    timeout=content_timeout,
-                                )
-                                ensure_active()
-                                if self._content_policy(umo) != (filter_r18, display):
-                                    raise RuntimeError(
-                                        "Pixiv content policy changed during rendering"
-                                    )
-                                if rendered is not None:
-                                    if local_files:
-                                        file_uri = rendered.resolve(
-                                            strict=True
-                                        ).as_uri()
-                                        content[1] = OneBotFileImage(file=file_uri)
-                                        entry_size = (
-                                            len(json.dumps(file_uri))
-                                            + len(json.dumps(caption))
-                                            + 512
-                                        )
-                                    else:
-                                        content[1] = Image.fromFileSystem(str(rendered))
-                                        entry_size = (
-                                            4 * ((rendered.stat().st_size + 2) // 3)
-                                            + len(json.dumps(caption))
-                                            + 512
-                                        )
                             else:
-                                translated = await asyncio.wait_for(
-                                    self._translate_image_content(
-                                        image, umo, content_language, content_provider
-                                    ),
-                                    timeout=content_timeout,
+                                content[1] = Image.fromFileSystem(str(rendered))
+                                entry_size = (
+                                    4 * ((rendered.stat().st_size + 2) // 3)
+                                    + len(json.dumps(caption))
+                                    + 512
                                 )
-                        text = "\n图片文字翻译：\n" + translated if translated else ""
-                    except Exception as exc:
-                        self.log.warning(
-                            "[juhkff] Pixiv image translation failed: "
-                            "artwork=%s, page=%s, error=%s: %s",
-                            item["id"],
-                            index + 1,
-                            type(exc).__name__,
-                            exc,
+                    else:
+                        translated = await asyncio.wait_for(
+                            self._translate_image_content(
+                                image, umo, content_language, content_provider
+                            ),
+                            timeout=content_timeout,
                         )
-                        text = "\n图片文字翻译暂不可用"
-                    ensure_active()
-                    if self._content_policy(umo) != (filter_r18, display):
-                        raise RuntimeError(
-                            "Pixiv content policy changed during rendering"
-                        )
-                    if text:
-                        content.append(Plain(text))
-                        entry_size += len(json.dumps(text)) + 128
-                return content, entry_size
+                    text = "\n图片文字翻译：\n" + translated if translated else ""
+                except Exception as exc:
+                    self.log.warning(
+                        "[juhkff] Pixiv image translation failed: "
+                        "artwork=%s, page=%s, error=%s: %s",
+                        item["id"],
+                        index + 1,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    text = "\n图片文字翻译暂不可用"
+                ensure_current()
+                if text:
+                    content.append(Plain(text))
+                    entry_size += len(json.dumps(text)) + 128
+            return content, entry_size
 
-            # Fixed workers bound both live page tasks and downloaded image buffers.
-            # Results are indexed before execution so completion order cannot reorder pages.
-            page_indices = list(indices)
-            results: list[tuple[list, int] | None] = [None] * len(page_indices)
-            pending_pages = iter(enumerate(page_indices))
+        async def worker() -> None:
+            while True:
+                ensure_current()
+                position, index = await queue.get()
+                try:
+                    ensure_current()
+                    if position in failed:
+                        continue
+                    async with self._pixiv_processing_slots:
+                        ensure_current()
+                        if position in failed:
+                            continue
 
-            async def render_pages() -> None:
-                for position, index in pending_pages:
-                    results[position] = await render_page(index)
+                        def guard() -> None:
+                            ensure_current()
+                            if position in failed:
+                                raise RuntimeError("Pixiv artwork already failed")
 
-            workers = [
-                asyncio.create_task(render_pages())
-                for _ in range(min(2 if translate_content else 1, len(page_indices)))
-            ]
-            try:
-                await asyncio.gather(*workers)
-            except Exception:
-                ensure_active()
-                if failed_work_ids is None:
-                    raise
-                failed_work_ids.add(item["id"])
+                        token = _PROCESSING_GUARD.set(guard)
+                        try:
+                            if index is None:
+                                await prepare_work(position)
+                            else:
+                                results[position][index] = await render_page(
+                                    position, index
+                                )
+                        except Exception:
+                            ensure_current()
+                            if failed_work_ids is None:
+                                raise
+                            failed.add(position)
+                            failed_work_ids.add(works[position]["id"])
+                            self.log.exception(
+                                "[juhkff] Pixiv artwork rendering failed: artwork=%s",
+                                works[position]["id"],
+                            )
+                        finally:
+                            _PROCESSING_GUARD.reset(token)
+                finally:
+                    queue.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(self._pixiv_processing_concurrency)
+        ]
+        joined = asyncio.create_task(queue.join())
+        try:
+            done, _ = await asyncio.wait(
+                [joined, *workers], return_when=asyncio.FIRST_COMPLETED
+            )
+            # A failed/cancelled worker must surface even when queue.join also finishes.
+            for task in done:
+                task.result()
+        finally:
+            for task in [joined, *workers]:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(joined, *workers, return_exceptions=True)
+        for position, item in enumerate(works):
+            if position in failed:
                 work_captions.pop(item["id"], None)
                 restricted_work_ids.discard(item["id"])
-                self.log.exception(
-                    "[juhkff] Pixiv artwork rendering failed: artwork=%s", item["id"]
-                )
-                # No page is appended until every page of this work succeeds.
                 continue
-            finally:
-                # gather does not cancel siblings when a download/guard fails.
-                for task in workers:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
-            for result in results:
+            for result in results[position]:
                 if result is not None:
                     content, entry_size = result
                     entries.append(content)
