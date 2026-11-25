@@ -955,6 +955,38 @@
           }
         }
       },
+      "content_translation": {
+        "description": "作品内容翻译",
+        "type": "object",
+        "hint": "独立于标题、简介的自动翻译。识别每张图片内的文字，并在该图片后附上译文；所有 Pixiv 取图与推送入口均生效。无文字时不附译文，失败时提示「翻译暂不可用」并继续发图。每页最多等待 60 秒，逐图调用会增加模型用量和等待时间。原图链接展示仍发送链接，但开启识别后会下载原图并交给模型。",
+        "items": {
+          "enable": {
+            "description": "启用作品内容翻译",
+            "type": "bool",
+            "default": false,
+            "hint": "默认关闭；开启后逐张识别图片文字并翻译，不修改图片本身。"
+          },
+          "provider_id": {
+            "description": "内容翻译识图模型",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "condition": {
+              "enable": true
+            },
+            "hint": "可指定支持图片输入的识图模型；留空使用接收群当前的聊天模型，该模型也需要支持图片输入。"
+          },
+          "language": {
+            "description": "翻译语言",
+            "type": "string",
+            "default": "中文",
+            "condition": {
+              "enable": true
+            },
+            "hint": "图片内文字的目标语言，例如中文、英语或日语；留空时使用中文，独立于标题、简介的翻译语言。"
+          }
+        }
+      },
       "filter_r18": {
         "description": "过滤 R18 作品",
         "type": "bool",

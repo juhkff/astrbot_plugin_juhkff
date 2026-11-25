@@ -273,6 +273,82 @@ class PixivFileTransportTests(IsolatedAsyncioTestCase):
                     self.assertEqual(len(page["data"]["content"]), 1)
                     self.assertEqual(page["data"]["content"][0]["type"], "image")
 
+    async def test_content_translation_follows_each_original_in_all_entrypoints(self):
+        self.module.cfg["content_translation"] = {
+            "enable": True,
+            "provider_id": "vision-model",
+            "language": "中文",
+        }
+        self.work["page_count"] = 2
+        context = self.plugin.context
+        context.get_current_chat_provider_id = AsyncMock()
+        context.llm_generate = AsyncMock()
+        for entrypoint in (
+            "#pixiv日榜",
+            "#pixiv周榜",
+            "#pixiv月榜",
+            "#pixiv随机",
+            "#pixiv作品 7",
+            "daily_push",
+            "artist_push",
+        ):
+            with self.subTest(entrypoint=entrypoint):
+                self.bot.call_action.reset_mock()
+                context.llm_generate.reset_mock()
+                context.llm_generate.side_effect = [
+                    SimpleNamespace(completion_text=json.dumps({"translation": text}))
+                    for text in ("第一页文字", "第二页文字")
+                ]
+                if entrypoint == "daily_push":
+                    await self.module.push_daily_ranking()
+                elif entrypoint == "artist_push":
+                    self.module._artists["7"] = {"last_id": "1", "delivered": {}}
+                    self.module._fetch_ids = AsyncMock(return_value=["1", "2"])
+                    self.assertTrue(await self.module._check_artist("7"))
+                else:
+                    event = cast(
+                        AstrMessageEvent,
+                        SimpleNamespace(
+                            message_str=entrypoint,
+                            is_at_or_wake_command=True,
+                            unified_msg_origin=self.umo,
+                            get_message_type=lambda: MessageType.GROUP_MESSAGE,
+                            get_self_id=lambda: "123",
+                            plain_result=lambda text: MessageChain().message(text),
+                        ),
+                    )
+                    result = await self.module.handle(event)
+                    assert result is not None
+                    await context.send_message(self.umo, result)
+                self.assertEqual(context.llm_generate.await_count, 2)
+                context.get_current_chat_provider_id.assert_not_awaited()
+                for index, call in enumerate(context.llm_generate.await_args_list):
+                    self.assertEqual(call.kwargs["chat_provider_id"], "vision-model")
+                    self.assertEqual(
+                        call.kwargs["image_urls"], [str(self.images[index])]
+                    )
+                    self.assertEqual(
+                        json.loads(call.kwargs["prompt"]), {"language": "中文"}
+                    )
+                self.bot.call_action.assert_awaited_once()
+                call = self.bot.call_action.await_args
+                assert call is not None
+                pages = call.kwargs["messages"]
+                self.assertEqual(len(pages), 3)
+                for index, page in enumerate(pages[1:]):
+                    content = page["data"]["content"]
+                    self.assertEqual(
+                        [part["type"] for part in content], ["image", "text"]
+                    )
+                    self.assertEqual(
+                        content[0]["data"]["file"], self.images[index].as_uri()
+                    )
+                    self.assertEqual(
+                        content[1]["data"]["text"],
+                        "\n图片文字翻译：\n"
+                        + ("第一页文字" if index == 0 else "第二页文字"),
+                    )
+
     async def test_local_transport_keeps_restricted_filter_and_link_policy(self):
         work = {**self.work, "x_restrict": 1}
         self.assertIsNone(await self.module._render_items([work], self.umo))
