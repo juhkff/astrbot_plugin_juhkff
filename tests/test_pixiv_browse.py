@@ -696,6 +696,64 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         self.assertEqual(awaited(fetch).kwargs["headers"]["Cookie"], "session=test")
         self.assertEqual(awaited(fetch).kwargs["params"]["mode"], "monthly")
 
+    async def test_ranking_later_page_404_keeps_previous_pages(self):
+        for mode in ("daily", "weekly", "monthly", "daily_r18", "weekly_r18"):
+            with self.subTest(mode=mode):
+                responses = [
+                    {"contents": [{"illust_id": 7, "rank": 1}]},
+                    {"contents": [{"illust_id": 8, "rank": 51}]},
+                    RuntimeError(
+                        f"HTTP 404 https://www.pixiv.net/ranking.php?mode={mode}&format=json&p=3"
+                    ),
+                ]
+                with patch.object(
+                    browse, "fetch_json", AsyncMock(side_effect=responses)
+                ) as fetch:
+                    candidates = await self.host._browse_candidates(mode, 10)
+                self.assertEqual(candidates, [("7", 1), ("8", 51)])
+                self.assertEqual(fetch.await_count, 3)
+                self.assertEqual(
+                    [call.kwargs["params"]["p"] for call in fetch.await_args_list],
+                    [1, 2, 3],
+                )
+
+    async def test_ranking_first_page_404_and_other_failures_propagate(self):
+        first_page = {"contents": [{"illust_id": 7, "rank": 1}]}
+        for responses in (
+            [RuntimeError("HTTP 404 https://www.pixiv.net/ranking.php")],
+            [first_page, RuntimeError("HTTP 403 https://www.pixiv.net/ranking.php")],
+            [first_page, RuntimeError("HTTP 429 https://www.pixiv.net/ranking.php")],
+            [first_page, RuntimeError("HTTP 500 https://www.pixiv.net/ranking.php")],
+            [first_page, RuntimeError("HTTP 4040 invalid status")],
+            [
+                {"contents": [{"illust_id": "invalid"}]},
+                RuntimeError("HTTP 404 missing"),
+            ],
+        ):
+            with self.subTest(error=str(responses[-1])):
+                error = responses[-1]
+                with (
+                    patch.object(
+                        browse, "fetch_json", AsyncMock(side_effect=responses)
+                    ),
+                    self.assertRaises(RuntimeError) as caught,
+                ):
+                    await self.host._browse_candidates("daily_r18", 10)
+                self.assertIs(caught.exception, error)
+
+    async def test_search_later_page_404_does_not_return_partial_results(self):
+        error = RuntimeError("HTTP 404 https://www.pixiv.net/ajax/search/artworks/test")
+        responses = [
+            {"body": {"illustManga": {"data": [{"id": "7"}]}}},
+            error,
+        ]
+        with (
+            patch.object(browse, "fetch_json", AsyncMock(side_effect=responses)),
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            await self.host._browse_candidates("daily", 3, "test")
+        self.assertIs(caught.exception, error)
+
     async def test_random_search_quoted_and_filtered_pool_replenished(self):
         self.host.cfg["random"]["search_pages"] = 1
         response = {

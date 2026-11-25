@@ -227,15 +227,26 @@ class PixivBrowseMixin:
                 if keyword
                 else {"mode": mode, "format": "json", "p": page}
             )
-            data = await fetch_json(
-                url,
-                params=params,
-                headers=self._api_headers(),
-                proxy=self.proxy or None,
-                timeout=25.0,
-                allowed_hosts={"www.pixiv.net"},
-                proxy_resolve=True,
-            )
+            try:
+                data = await fetch_json(
+                    url,
+                    params=params,
+                    headers=self._api_headers(),
+                    proxy=self.proxy or None,
+                    timeout=25.0,
+                    allowed_hosts={"www.pixiv.net"},
+                    proxy_resolve=True,
+                )
+            except RuntimeError as exc:
+                # Rankings return HTTP 404 when the requested page exceeds the list.
+                if (
+                    not keyword
+                    and page > 1
+                    and candidates
+                    and str(exc).startswith("HTTP 404 ")
+                ):
+                    break
+                raise
             if not isinstance(data, dict) or data.get("error"):
                 raise ValueError("Pixiv browse API returned an error")
             if keyword:
