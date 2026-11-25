@@ -195,9 +195,250 @@ class PixivRandomTests(IsolatedAsyncioTestCase):
             await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
         )
         self.assertEqual(self.host._fetch_detail.await_count, 12)
-        self.fetch.assert_awaited_once()
+        self.assertEqual(self.fetch.await_count, 3)
+        for request in self.fetch.await_args_list:
+            self.assertEqual(
+                request.args[0], "https://www.pixiv.net/ajax/discovery/artworks"
+            )
+            self.assertEqual(request.kwargs["params"], {"mode": "all", "limit": 60})
         self.host._render_items.assert_not_awaited()
         self.host.plugin.context.send_message.assert_not_awaited()
+
+    @staticmethod
+    def discovery(*rows):
+        return {
+            "error": False,
+            "body": {
+                "thumbnails": {
+                    "illust": [
+                        row if isinstance(row, dict) else {"id": row} for row in rows
+                    ]
+                }
+            },
+        }
+
+    async def test_refills_after_history_only_and_low_view_batches(self):
+        self.host._random_push_recent[ORIGIN] = ["7"]
+        self.fetch.side_effect = [
+            self.discovery("7"),
+            self.discovery("8"),
+            self.discovery("9"),
+        ]
+        self.host._fetch_detail.side_effect = lambda iid: {
+            "id": iid,
+            "view_count": 9999 if iid == "8" else 10000,
+            "x_restrict": 0,
+        }
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(self.fetch.await_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in self.host._fetch_detail.await_args_list],
+            ["8", "9"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in self.shuffle.call_args_list if call.args[0]],
+            [["8"], ["9"]],
+        )
+        self.host.plugin.context.send_message.assert_awaited_once_with(
+            ORIGIN, "rendered"
+        )
+        self.assertEqual(self.host._random_push_recent[ORIGIN], ["7", "9"])
+
+    async def test_normalized_duplicates_and_previously_filtered_ids_are_not_retried(
+        self,
+    ):
+        self.fetch.side_effect = [
+            self.discovery(
+                "0007", {"id": "8", "illustType": 2}, {"id": "9", "xRestrict": 1}
+            ),
+            self.discovery(7, "0008", "0009", "10"),
+        ]
+        self.host._fetch_detail.side_effect = lambda iid: {
+            "id": iid,
+            "view_count": 9999 if iid == "7" else 10000,
+            "x_restrict": 0,
+        }
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(self.fetch.await_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in self.host._fetch_detail.await_args_list],
+            ["7", "10"],
+        )
+
+    async def test_unique_low_view_batches_stop_at_five_requests_and_sixty_details(
+        self,
+    ):
+        self.fetch.side_effect = [
+            self.discovery(*(str(i) for i in range(start, start + 60)))
+            for start in range(1, 361, 60)
+        ]
+        self.host._fetch_detail.side_effect = lambda iid: {
+            "id": iid,
+            "view_count": 9999,
+            "x_restrict": 0,
+        }
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
+        )
+        self.assertEqual(self.fetch.await_count, 5)
+        self.assertEqual(self.host._fetch_detail.await_count, 60)
+        expected = [
+            str(i) for start in range(1, 301, 60) for i in range(start, start + 12)
+        ]
+        self.assertEqual(
+            [call.args[0] for call in self.host._fetch_detail.await_args_list], expected
+        )
+        self.assertEqual(self.shuffle.call_count, 5)
+        for request in self.fetch.await_args_list:
+            self.assertEqual(request.kwargs["params"], {"mode": "all", "limit": 60})
+        self.host._render_items.assert_not_awaited()
+        self.host.plugin.context.send_message.assert_not_awaited()
+
+    async def test_two_empty_or_invalid_id_batches_stop_without_details(self):
+        self.fetch.side_effect = [
+            self.discovery(),
+            self.discovery("0", "000", "bad", "-1", True),
+            self.discovery("7"),
+        ]
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 0
+        )
+        self.assertEqual(self.fetch.await_count, 2)
+        self.host._fetch_detail.assert_not_awaited()
+        self.host.plugin.context.send_message.assert_not_awaited()
+
+    async def test_new_filtered_ids_reset_no_new_streak(self):
+        self.host._random_push_recent[ORIGIN] = ["7"]
+        self.fetch.side_effect = [
+            self.discovery("7"),
+            self.discovery("007"),
+            self.discovery({"id": "8", "illustType": 2}, {"id": "9", "xRestrict": 1}),
+            self.discovery("8", "009"),
+            self.discovery("10"),
+        ]
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(self.fetch.await_count, 5)
+        self.host._fetch_detail.assert_awaited_once_with("10")
+        self.host.plugin.context.send_message.assert_awaited_once_with(
+            ORIGIN, "rendered"
+        )
+
+    async def test_detail_and_download_failures_refill_until_render_success(self):
+        self.fetch.side_effect = [
+            self.discovery("1"),
+            self.discovery("2"),
+            self.discovery("3"),
+        ]
+        self.host._fetch_detail.side_effect = [
+            RuntimeError("detail unavailable"),
+            {"id": "2", "view_count": 10000, "x_restrict": 0},
+            {"id": "3", "view_count": 10000, "x_restrict": 0},
+        ]
+        self.host._render_items.side_effect = [None, "rendered"]
+        self.assertEqual(
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"]), 1
+        )
+        self.assertEqual(self.fetch.await_count, 3)
+        self.assertEqual(self.host._render_items.await_count, 2)
+        self.host.plugin.context.send_message.assert_awaited_once_with(
+            ORIGIN, "rendered"
+        )
+        self.assertEqual(self.host._random_push_recent[ORIGIN], ["3"])
+
+    async def test_second_discovery_invalid_response_or_network_error_propagates(self):
+        for failure in (
+            {"error": True},
+            {"body": {}},
+            RuntimeError("network unavailable"),
+        ):
+            with self.subTest(failure=failure):
+                host = RandomHost()
+                host._random_push_recent[ORIGIN] = ["7"]
+                self.fetch.reset_mock()
+                self.fetch.side_effect = [
+                    self.discovery("7"),
+                    failure,
+                    self.discovery("8"),
+                ]
+                expected = (
+                    RuntimeError if isinstance(failure, Exception) else ValueError
+                )
+                with self.assertRaises(expected):
+                    await host._push_random_group(ORIGIN, host.cfg["random_push"])
+                self.assertEqual(self.fetch.await_count, 2)
+                host._fetch_detail.assert_not_awaited()
+                host.plugin.context.send_message.assert_not_awaited()
+
+    async def test_cancel_during_second_discovery_propagates(self):
+        self.host._random_push_recent[ORIGIN] = ["7"]
+        self.fetch.side_effect = [self.discovery("7"), asyncio.CancelledError()]
+        with self.assertRaises(asyncio.CancelledError):
+            await self.host._push_random_group(ORIGIN, self.host.cfg["random_push"])
+        self.assertEqual(self.fetch.await_count, 2)
+        self.host._fetch_detail.assert_not_awaited()
+        self.host.plugin.context.send_message.assert_not_awaited()
+
+    async def test_revocation_during_second_discovery_prevents_details_and_delivery(
+        self,
+    ):
+        for revoke in ("disable", "remove", "stop", "module", "threshold", "policy"):
+            with self.subTest(revoke=revoke):
+                host = RandomHost()
+                host._random_push_recent[ORIGIN] = ["7"]
+                snapshot = deepcopy(host.cfg["random_push"])
+                calls = 0
+
+                async def discovery(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return self.discovery("7")
+                    if revoke == "disable":
+                        host.cfg["random_push"]["enable"] = False
+                    elif revoke == "remove":
+                        host.cfg["random_push"]["groups"] = []
+                    elif revoke == "stop":
+                        host._stopped = True
+                    elif revoke == "module":
+                        host.enabled = False
+                    elif revoke == "threshold":
+                        host.cfg["random_push"]["min_views"] = 10001
+                    else:
+                        host._content_policy.return_value = (False, "original")
+                    return self.discovery("8")
+
+                with patch.object(random_push, "fetch_json", side_effect=discovery):
+                    self.assertEqual(await host._push_random_group(ORIGIN, snapshot), 0)
+                self.assertEqual(calls, 2)
+                host._fetch_detail.assert_not_awaited()
+                host._render_items.assert_not_awaited()
+                host.plugin.context.send_message.assert_not_awaited()
+
+    async def test_failed_send_aborts_without_refilling_or_trying_another_candidate(
+        self,
+    ):
+        for failure in (False, RuntimeError("send failed")):
+            with self.subTest(failure=failure):
+                host = RandomHost()
+                host.plugin.context.send_message.side_effect = (
+                    failure if isinstance(failure, Exception) else None
+                )
+                host.plugin.context.send_message.return_value = failure
+                self.fetch.reset_mock()
+                self.fetch.side_effect = [self.discovery("7", "8"), self.discovery("9")]
+                with self.assertRaises(RuntimeError):
+                    await host._push_random_group(ORIGIN, host.cfg["random_push"])
+                self.fetch.assert_awaited_once()
+                host._fetch_detail.assert_awaited_once_with("7")
+                host.plugin.context.send_message.assert_awaited_once()
+                self.assertEqual(host._random_push_recent, {})
+                self.save.assert_not_called()
 
     async def test_group_policy_can_allow_restricted_work(self):
         self.host._content_policy.return_value = (False, "link")

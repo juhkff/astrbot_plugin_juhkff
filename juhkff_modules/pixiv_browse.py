@@ -27,6 +27,8 @@ from .common import fetch_json
 _COMMANDS = ("pixiv日榜", "pixiv周榜", "pixiv月榜", "pixiv随机", "pixiv作品")
 _FORWARD_BATCH_BYTES = 16 * 1024 * 1024
 _TRANSLATION_TIMEOUT = 30.0
+_R18_RANKING_MODES = {"daily": "daily_r18", "weekly": "weekly_r18"}
+_NSFW_SEPARATOR = "---------------- NSFW ----------------"
 _USAGE = (
     "用法：#pixiv日榜 / #pixiv周榜 / #pixiv月榜（不带参数）；"
     "#pixiv随机 [标签/关键词]；#pixiv作品 ID或Pixiv作品链接 [第N张]"
@@ -285,37 +287,71 @@ class PixivBrowseMixin:
         )
         if not randomized:
             pages = 1
-        candidates = await self._browse_candidates(mode, pages, keyword)
-        if randomized:
-            random.shuffle(candidates)
+        modes = [mode]
+        dual_ranking = (
+            not randomized
+            and mode in _R18_RANKING_MODES
+            and not self._content_policy(origin)[0]
+        )
+        if dual_ranking:
+            modes.append(_R18_RANKING_MODES[mode])
         selected = []
         ranks = {}
+        seen = set()
         failures = 0
-        for iid, rank in candidates:
+        for source_mode in modes:
             if self._stopped or not self.enabled:
                 break
+            adult_source = source_mode in _R18_RANKING_MODES.values()
+            if adult_source and self._content_policy(origin)[0]:
+                continue
             try:
-                item = await self._fetch_detail(iid)
-                restriction = item.get("x_restrict", -1)
-                if restriction not in (0, 1, 2) or (
-                    restriction != 0 and self._content_policy(origin)[0]
-                ):
-                    continue
-                selected.append(item)
-                if rank is not None:
-                    ranks[iid] = rank
-                if len(selected) >= count:
-                    break
+                candidates = await self._browse_candidates(source_mode, pages, keyword)
             except Exception:
-                failures += 1
-                self.log.exception("[juhkff] Pixiv browse candidate failed: %s", iid)
+                if not adult_source:
+                    raise
+                self.log.exception(
+                    "[juhkff] Pixiv R18 ranking unavailable: %s", source_mode
+                )
+                continue
+            if randomized:
+                random.shuffle(candidates)
+            source_count = 0
+            for iid, rank in candidates:
+                if self._stopped or not self.enabled:
+                    break
+                if iid in seen:
+                    continue
+                try:
+                    item = await self._fetch_detail(iid)
+                    restriction = item.get("x_restrict", -1)
+                    if restriction not in (0, 1, 2) or (
+                        restriction != 0 and self._content_policy(origin)[0]
+                    ):
+                        continue
+                    if not randomized and (restriction != 0) != adult_source:
+                        continue
+                    seen.add(iid)
+                    selected.append(item)
+                    if rank is not None:
+                        ranks[iid] = rank
+                    source_count += 1
+                    if source_count >= count:
+                        break
+                except Exception:
+                    failures += 1
+                    self.log.exception(
+                        "[juhkff] Pixiv browse candidate failed: %s", iid
+                    )
         if not selected and failures:
             raise RuntimeError("Pixiv candidates could not be loaded")
+        options = {"ranking_sections": True} if dual_ranking else {}
         return await self._render_items(
             selected,
             origin,
             ranks=None if randomized else ranks,
             bot_id=bot_id,
+            **options,
         )
 
     async def _translate_artwork_text(
@@ -397,11 +433,18 @@ class PixivBrowseMixin:
             " Also include a 'regions' array in reading order. Each region must have "
             "'text' (translated string), 'bbox' [left,top,right,bottom] tightly enclosing "
             "the ORIGINAL text, and 'direction' ('horizontal' or 'vertical' for the "
-            "original writing). All coordinates are integers normalized to 0..1000 "
+            "original writing). Group all lines and columns belonging to the SAME "
+            "speech bubble into ONE region, with a bbox enclosing all its text and "
+            "a complete combined translation. Keep separate bubbles and outside "
+            "captions in separate regions. Do not split one bubble into overlapping "
+            "regions. All coordinates are integers normalized to 0..1000 "
             "relative to the entire input image. If and only if text is inside a "
             "plain speech bubble, include 'bubble': [left,top,right,bottom], an inset "
             "safe rectangle inside the bubble containing its text but excluding the "
-            "bubble outline, tails, drawings and characters. Otherwise omit 'bubble'. "
+            "bubble outline, tails, drawings and characters. Give the largest safe "
+            "interior rectangle available for reflow, rather than copying the tight "
+            "text bbox. For an oval bubble, keep rectangle corners inside its curved "
+            "outline. Otherwise omit 'bubble'. "
             "Never guess a safe bubble rectangle for text over artwork. Each region's "
             "translation must correspond exactly to the text inside its bbox. "
             "The top-level 'translation' must be exactly all region text joined with "
@@ -458,8 +501,11 @@ class PixivBrowseMixin:
             )
         except Exception as exc:
             self.log.warning(
-                "[juhkff] Pixiv layout recognition failed; using plain translation: %s",
+                "[juhkff] Pixiv layout recognition failed; using plain translation: "
+                "image=%s, error=%s: %s",
+                image.name,
                 type(exc).__name__,
+                exc,
             )
             return None, await self._translate_image_content(
                 image, umo, language, provider_id
@@ -484,8 +530,11 @@ class PixivBrowseMixin:
             return rendered, ""
         except Exception as exc:
             self.log.warning(
-                "[juhkff] Pixiv typesetting failed; using plain translation: %s",
+                "[juhkff] Pixiv typesetting failed; using plain translation: "
+                "image=%s, error=%s: %s",
+                image.name,
                 type(exc).__name__,
+                exc,
             )
             return None, translated
 
@@ -497,6 +546,8 @@ class PixivBrowseMixin:
         ranks: dict[str, int] | None = None,
         delivery_active: Callable[[], bool] | None = None,
         bot_id: str | None = None,
+        ranking_sections: bool = False,
+        failed_work_ids: set[str] | None = None,
     ) -> MessageChain | None:
         """Render works, nesting albums only when multiple works are displayed.
 
@@ -506,6 +557,9 @@ class PixivBrowseMixin:
             ranks: Artwork IDs mapped to their original ranking positions.
             delivery_active: Optional subscription identity and membership guard.
             bot_id: Known sender account, avoiding an extra OneBot API request.
+            ranking_sections: Keep ranking sections in one forward with an NSFW divider.
+            failed_work_ids: Optional collector for failed works to skip in this batch.
+                Without a collector, required page failures abort the entire render.
 
         Returns:
             A direct or merged message, or None if every work was filtered.
@@ -533,18 +587,40 @@ class PixivBrowseMixin:
         language = str(translation.get("language") or "").strip() or "中文"
         content_translation = self.cfg.get("content_translation") or {}
         translate_content = content_translation.get("enable", False)
+        content_timeout = max(
+            30, _bounded(content_translation.get("timeout_seconds"), 120, 300)
+        )
+        if (
+            translate_content
+            and getattr(self, "_content_translation_slots", None) is None
+        ):
+            # Share provider capacity across concurrent destinations and render calls.
+            self._content_translation_slots = asyncio.Semaphore(2)
         content_language = (
             str(content_translation.get("language") or "").strip() or "中文"
         )
         content_provider = str(content_translation.get("provider_id") or "").strip()
         filter_r18, display = self._content_policy(umo)
+        restricted_work_ids = set()
+        if ranking_sections:
+            items = sorted(items, key=lambda work: work.get("x_restrict", -1) != 0)
         for item in items:
             restriction = item.get("x_restrict", -1)
             restricted = restriction != 0
             if restriction not in (0, 1, 2) or (restricted and filter_r18):
                 continue
             ensure_active()
-            pages = await self._fetch_pages(item)
+            try:
+                pages = await self._fetch_pages(item)
+            except Exception:
+                ensure_active()
+                if failed_work_ids is None:
+                    raise
+                failed_work_ids.add(item["id"])
+                self.log.exception(
+                    "[juhkff] Pixiv artwork pages failed: artwork=%s", item["id"]
+                )
+                continue
             ensure_active()
             title = item["title"]
             description = item.get("description", "")
@@ -582,11 +658,14 @@ class PixivBrowseMixin:
                 + (f"作品说明：\n{description}\n" if description else "")
             )
             work_captions[item["id"]] = caption
+            if restricted:
+                restricted_work_ids.add(item["id"])
             requested_page = item.get("_browse_page")
             indices = (
                 [requested_page] if requested_page is not None else range(len(pages))
             )
-            for index in indices:
+
+            async def render_page(index: int) -> tuple[list, int]:
                 ensure_active()
                 source = pages[index]
                 image = None
@@ -642,57 +721,66 @@ class PixivBrowseMixin:
                             raise ValueError(
                                 "Pixiv image translation has no local image"
                             )
-                        if content_translation.get(
-                            "mode", "text"
-                        ) == "overlay" and not (restricted and display == "link"):
-                            rendered, translated = await asyncio.wait_for(
-                                self._typeset_image_content(
-                                    image,
-                                    umo,
-                                    content_language,
-                                    content_provider,
-                                    str(
-                                        content_translation.get("font_path") or ""
-                                    ).strip(),
-                                ),
-                                timeout=60.0,
-                            )
+                        async with self._content_translation_slots:
                             ensure_active()
                             if self._content_policy(umo) != (filter_r18, display):
                                 raise RuntimeError(
                                     "Pixiv content policy changed during rendering"
                                 )
-                            if rendered is not None:
-                                if local_files:
-                                    file_uri = rendered.resolve(strict=True).as_uri()
-                                    content[1] = OneBotFileImage(file=file_uri)
-                                    entry_size = (
-                                        len(json.dumps(file_uri))
-                                        + len(json.dumps(caption))
-                                        + 512
+                            if content_translation.get(
+                                "mode", "text"
+                            ) == "overlay" and not (restricted and display == "link"):
+                                rendered, translated = await asyncio.wait_for(
+                                    self._typeset_image_content(
+                                        image,
+                                        umo,
+                                        content_language,
+                                        content_provider,
+                                        str(
+                                            content_translation.get("font_path") or ""
+                                        ).strip(),
+                                    ),
+                                    timeout=content_timeout,
+                                )
+                                ensure_active()
+                                if self._content_policy(umo) != (filter_r18, display):
+                                    raise RuntimeError(
+                                        "Pixiv content policy changed during rendering"
                                     )
-                                else:
-                                    content[1] = Image.fromFileSystem(str(rendered))
-                                    entry_size = (
-                                        4 * ((rendered.stat().st_size + 2) // 3)
-                                        + len(json.dumps(caption))
-                                        + 512
-                                    )
-                        else:
-                            translated = await asyncio.wait_for(
-                                self._translate_image_content(
-                                    image, umo, content_language, content_provider
-                                ),
-                                timeout=60.0,
-                            )
+                                if rendered is not None:
+                                    if local_files:
+                                        file_uri = rendered.resolve(
+                                            strict=True
+                                        ).as_uri()
+                                        content[1] = OneBotFileImage(file=file_uri)
+                                        entry_size = (
+                                            len(json.dumps(file_uri))
+                                            + len(json.dumps(caption))
+                                            + 512
+                                        )
+                                    else:
+                                        content[1] = Image.fromFileSystem(str(rendered))
+                                        entry_size = (
+                                            4 * ((rendered.stat().st_size + 2) // 3)
+                                            + len(json.dumps(caption))
+                                            + 512
+                                        )
+                            else:
+                                translated = await asyncio.wait_for(
+                                    self._translate_image_content(
+                                        image, umo, content_language, content_provider
+                                    ),
+                                    timeout=content_timeout,
+                                )
                         text = "\n图片文字翻译：\n" + translated if translated else ""
                     except Exception as exc:
                         self.log.warning(
                             "[juhkff] Pixiv image translation failed: "
-                            "artwork=%s, page=%s, error=%s",
+                            "artwork=%s, page=%s, error=%s: %s",
                             item["id"],
                             index + 1,
                             type(exc).__name__,
+                            exc,
                         )
                         text = "\n图片文字翻译暂不可用"
                     ensure_active()
@@ -703,9 +791,48 @@ class PixivBrowseMixin:
                     if text:
                         content.append(Plain(text))
                         entry_size += len(json.dumps(text)) + 128
-                entries.append(content)
-                entry_sizes.append(entry_size)
-                entry_work_ids.append(item["id"])
+                return content, entry_size
+
+            # Fixed workers bound both live page tasks and downloaded image buffers.
+            # Results are indexed before execution so completion order cannot reorder pages.
+            page_indices = list(indices)
+            results: list[tuple[list, int] | None] = [None] * len(page_indices)
+            pending_pages = iter(enumerate(page_indices))
+
+            async def render_pages() -> None:
+                for position, index in pending_pages:
+                    results[position] = await render_page(index)
+
+            workers = [
+                asyncio.create_task(render_pages())
+                for _ in range(min(2 if translate_content else 1, len(page_indices)))
+            ]
+            try:
+                await asyncio.gather(*workers)
+            except Exception:
+                ensure_active()
+                if failed_work_ids is None:
+                    raise
+                failed_work_ids.add(item["id"])
+                work_captions.pop(item["id"], None)
+                restricted_work_ids.discard(item["id"])
+                self.log.exception(
+                    "[juhkff] Pixiv artwork rendering failed: artwork=%s", item["id"]
+                )
+                # No page is appended until every page of this work succeeds.
+                continue
+            finally:
+                # gather does not cancel siblings when a download/guard fails.
+                for task in workers:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+            for result in results:
+                if result is not None:
+                    content, entry_size = result
+                    entries.append(content)
+                    entry_sizes.append(entry_size)
+                    entry_work_ids.append(item["id"])
         ensure_active()
         if not entries:
             return None
@@ -716,7 +843,7 @@ class PixivBrowseMixin:
             len(work_captions),
             len(entries),
         )
-        if len(entries) < 2:
+        if len(entries) < 2 and not (ranking_sections and restricted_work_ids):
             return MessageChain([component for entry in entries for component in entry])
         if bot_id is None:
             bot_id = await self._get_bot_id(umo)
@@ -728,8 +855,22 @@ class PixivBrowseMixin:
         batch_size = 1024
         previous_work = None
         work_node: Node | None = None
+        nsfw_started = False
         for entry, size, work_id in zip(entries, entry_sizes, entry_work_ids):
-            if not local_files and nodes and batch_size + size > _FORWARD_BATCH_BYTES:
+            if ranking_sections and work_id in restricted_work_ids and not nsfw_started:
+                nodes.append(
+                    Node(name="Pixiv", uin=bot_id, content=[Plain(_NSFW_SEPARATOR)])
+                )
+                nsfw_started = True
+                previous_work = None
+                work_node = None
+                batch_size += 512
+            if (
+                not ranking_sections
+                and not local_files
+                and nodes
+                and batch_size + size > _FORWARD_BATCH_BYTES
+            ):
                 batches.append(Nodes(nodes))
                 nodes = []
                 batch_size = 1024

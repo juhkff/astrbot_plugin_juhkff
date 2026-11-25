@@ -291,7 +291,7 @@ class PixivContentTranslationTests(IsolatedAsyncioTestCase):
                 )
 
                 async def short_timeout(awaitable, timeout):
-                    self.assertEqual(timeout, 60)
+                    self.assertEqual(timeout, 120)
                     return await original_wait_for(awaitable, timeout=0.01)
 
                 with patch.object(
@@ -300,6 +300,43 @@ class PixivContentTranslationTests(IsolatedAsyncioTestCase):
                     result = must(await self.host._render_items([item()], self.umo))
                 self.assertTrue(cancelled.is_set())
                 self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
+
+    async def test_configured_timeout_applies_to_text_and_overlay_with_safe_bounds(
+        self,
+    ):
+        original_wait_for = asyncio.wait_for
+        for mode in ("text", "overlay"):
+            for config, expected in (
+                ({}, 120),
+                ({"timeout_seconds": 180}, 180),
+                ({"timeout_seconds": "240"}, 240),
+                ({"timeout_seconds": 0}, 30),
+                ({"timeout_seconds": 999}, 300),
+                ({"timeout_seconds": "invalid"}, 120),
+                ({"timeout_seconds": True}, 120),
+            ):
+                with self.subTest(mode=mode, config=config):
+                    self.host.cfg["content_translation"] = {
+                        "enable": True,
+                        "mode": mode,
+                        **config,
+                    }
+                    self.host._translate_image_content = AsyncMock(return_value="Hello")
+                    self.host._typeset_image_content = AsyncMock(
+                        return_value=(None, "Hello")
+                    )
+                    observed = []
+
+                    async def capture_timeout(awaitable, timeout):
+                        observed.append(timeout)
+                        return await original_wait_for(awaitable, timeout)
+
+                    with patch.object(
+                        browse.asyncio, "wait_for", side_effect=capture_timeout
+                    ):
+                        result = must(await self.host._render_items([item()], self.umo))
+                    self.assertEqual(observed, [expected])
+                    self.assertEqual(result.chain[-1].text, "\n图片文字翻译：\nHello")
 
     async def test_cancellation_propagates_without_fallback_message(self):
         self.host._translate_image_content = AsyncMock(

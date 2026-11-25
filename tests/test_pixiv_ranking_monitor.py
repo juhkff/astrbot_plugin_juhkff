@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, main
@@ -13,6 +14,9 @@ from unittest.mock import AsyncMock, Mock, patch
 from juhkff_modules import pixiv_random as random_push
 from juhkff_modules import pixiv_ranking_monitor as monitor
 from juhkff_modules.pixiv_ranking_monitor import PixivRankingMonitorMixin
+from test_pixiv_browse import BrowseHost, item
+
+from astrbot.api.message_components import Nodes
 
 
 class MonitorHost(PixivRankingMonitorMixin):
@@ -518,6 +522,201 @@ class PixivRankingMonitorTests(IsolatedAsyncioTestCase):
         await self.host.check_ranking_updates()
         self.assertEqual(self.host._ranking_monitor_ids, {"1"})
         self.send.assert_not_awaited()
+
+    async def test_failed_artwork_keeps_retry_without_blocking_healthy_batch(self):
+        for failure in ("pages", "download"):
+            with self.subTest(failure=failure), TemporaryDirectory() as temporary:
+                image = Path(temporary) / "image.png"
+                image.write_bytes(b"fixture")
+                renderer = BrowseHost(image)
+                host = MonitorHost()
+                origin = host.groups[0]
+                host.cfg["ranking"]["monitor"]["groups"] = [origin]
+                host._render_items = renderer._render_items
+                host._fetch_detail.side_effect = lambda iid: item(
+                    iid, pages=2 if iid == "2" else 1
+                )
+                await host.check_ranking_updates()
+                host._browse_candidates.return_value = [
+                    ("1", 1),
+                    ("2", 2),
+                    ("3", 3),
+                    ("4", 4),
+                ]
+                if failure == "pages":
+
+                    async def pages(work):
+                        if work["id"] == "2":
+                            raise RuntimeError("page API unavailable")
+                        return [work] * work["page_count"]
+
+                    renderer._fetch_pages.side_effect = pages
+                else:
+
+                    async def download(work, source, index, **kwargs):
+                        # The first page must also be discarded when page two fails.
+                        return None if work["id"] == "2" and index == 1 else image
+
+                    renderer._download.side_effect = download
+                send = host.plugin.context.send_message
+                await host.check_ranking_updates()
+                send.assert_awaited_once()
+                chain = send.await_args.args[1]
+                self.assertEqual(len(chain.chain), 1)
+                self.assertIsInstance(chain.chain[0], Nodes)
+                nodes = chain.chain[0].nodes
+                self.assertEqual(len(nodes), 2)
+                for node, iid in zip(nodes, ("3", "4")):
+                    self.assertIn(f"artworks/{iid}", node.content[0].text)
+                self.assertEqual(host._random_push_recent[origin], ["3", "4"])
+                self.assertEqual(host._ranking_monitor_pending[origin], {"2": 2})
+                # An all-failed retry must not clear pending state or send anything.
+                await host.check_ranking_updates()
+                send.assert_awaited_once()
+                self.assertEqual(host._ranking_monitor_pending[origin], {"2": 2})
+                renderer._fetch_pages.side_effect = lambda work: (
+                    [work] * work["page_count"]
+                )
+                renderer._download.side_effect = None
+                await host.check_ranking_updates()
+                self.assertEqual(send.await_count, 2)
+                self.assertEqual(host._random_push_recent[origin], ["3", "4", "2"])
+                self.assertEqual(host._ranking_monitor_pending[origin], {})
+
+    def dual_sources(self):
+        snapshots = {"daily": [("1", 1)], "daily_r18": [("8", 1)]}
+
+        async def candidates(mode, pages):
+            result = snapshots[mode]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        self.host._browse_candidates.side_effect = candidates
+        self.host._content_policy.return_value = (False, "link")
+        self.host._fetch_detail.side_effect = lambda iid: {
+            "id": iid,
+            "x_restrict": 1 if int(iid) >= 8 else 0,
+        }
+        return snapshots
+
+    async def test_dual_sources_are_combined_per_group_with_independent_policy(self):
+        snapshots = self.dual_sources()
+        first, second = self.host.groups
+        self.host._content_policy.side_effect = lambda origin: (origin == first, "link")
+        await self.host.check_ranking_updates()
+        self.send.assert_not_awaited()
+        snapshots["daily"] = [("1", 1), ("2", 2)]
+        snapshots["daily_r18"] = [("8", 1), ("9", 3)]
+        await self.host.check_ranking_updates()
+        self.assertEqual(self.send.await_count, 2)
+        calls = {call.args[1]: call for call in self.host._render_items.await_args_list}
+        self.assertEqual([work["id"] for work in calls[first].args[0]], ["2"])
+        self.assertEqual([work["id"] for work in calls[second].args[0]], ["2", "9"])
+        self.assertEqual(calls[second].kwargs["ranks"], {"2": 2, "9": 3})
+        self.assertTrue(calls[second].kwargs["ranking_sections"])
+        self.assertEqual(
+            self.host._random_push_recent, {first: ["2"], second: ["2", "9"]}
+        )
+
+    async def test_each_source_failure_preserves_its_baseline_and_other_updates(self):
+        snapshots = self.dual_sources()
+        origin = self.host.groups[0]
+        self.config["groups"] = [origin]
+        await self.host.check_ranking_updates()
+        snapshots["daily"] = [("1", 1), ("2", 2)]
+        snapshots["daily_r18"] = RuntimeError("adult API unavailable")
+        await self.host.check_ranking_updates()
+        self.assertEqual(self.host._random_push_recent[origin], ["2"])
+        snapshots["daily"] = RuntimeError("ordinary API unavailable")
+        snapshots["daily_r18"] = [("8", 1), ("9", 2)]
+        await self.host.check_ranking_updates()
+        self.assertEqual(self.host._random_push_recent[origin], ["2", "9"])
+        snapshots["daily"] = [("1", 1), ("2", 2), ("3", 3)]
+        await self.host.check_ranking_updates()
+        self.assertEqual(self.host._random_push_recent[origin], ["2", "9", "3"])
+        self.assertEqual(self.send.await_count, 3)
+
+    async def test_first_enabling_adult_source_baselines_without_resetting_general(
+        self,
+    ):
+        snapshots = self.dual_sources()
+        origin = self.host.groups[0]
+        self.config["groups"] = [origin]
+        self.host._content_policy.return_value = (True, "link")
+        await self.host.check_ranking_updates()
+        self.host._browse_candidates.assert_awaited_once_with("daily", 10)
+        self.host._content_policy.return_value = (False, "link")
+        snapshots["daily"] = [("1", 1), ("2", 2)]
+        await self.host.check_ranking_updates()
+        self.assertEqual(self.host._random_push_recent[origin], ["2"])
+        snapshots["daily_r18"] = [("8", 1), ("9", 2)]
+        await self.host.check_ranking_updates()
+        self.assertEqual(self.host._random_push_recent[origin], ["2", "9"])
+
+    async def test_resuming_adult_monitoring_establishes_a_fresh_baseline(self):
+        for pause in ("filtered", "monthly"):
+            with self.subTest(pause=pause):
+                snapshots = self.dual_sources()
+                self.config["mode"] = "daily"
+                self.config["groups"] = [self.host.groups[0]]
+                await self.host.check_ranking_updates()
+                if pause == "filtered":
+                    self.host._content_policy.return_value = (True, "link")
+                else:
+                    self.config["mode"] = "monthly"
+                    snapshots["monthly"] = [("4", 1)]
+                await self.host.check_ranking_updates()
+                self.host._content_policy.return_value = (False, "link")
+                self.config["mode"] = "daily"
+                snapshots["daily_r18"] = [("8", 1), ("9", 2)]
+                self.send.reset_mock()
+                await self.host.check_ranking_updates()
+                self.send.assert_not_awaited()
+
+    async def test_combined_failed_send_retries_all_works_once(self):
+        snapshots = self.dual_sources()
+        origin = self.host.groups[0]
+        self.config["groups"] = [origin]
+        await self.host.check_ranking_updates()
+        snapshots["daily"] = [("1", 1), ("2", 2)]
+        snapshots["daily_r18"] = [("8", 1), ("9", 2)]
+        self.send.return_value = False
+        await self.host.check_ranking_updates()
+        self.send.assert_awaited_once()
+        self.assertEqual(self.host._random_push_recent, {})
+        self.send.reset_mock()
+        self.send.return_value = True
+        await self.host.check_ranking_updates()
+        self.send.assert_awaited_once()
+        self.assertEqual(self.host._random_push_recent[origin], ["2", "9"])
+        self.send.reset_mock()
+        await self.host.check_ranking_updates()
+        self.send.assert_not_awaited()
+
+    async def test_combined_message_rerenders_when_history_removes_only_one_work(self):
+        snapshots = self.dual_sources()
+        origin = self.host.groups[0]
+        self.config["groups"] = [origin]
+        await self.host.check_ranking_updates()
+        snapshots["daily"] = [("1", 1), ("2", 2), ("3", 3)]
+        snapshots["daily_r18"] = [("8", 1), ("9", 2)]
+        rendered = []
+
+        async def render(works, *args, **kwargs):
+            ids = [work["id"] for work in works]
+            rendered.append(ids)
+            if len(rendered) == 1:
+                async with self.host._push_history_lock:
+                    self.host._random_push_recent[origin] = ["2"]
+            return ",".join(ids)
+
+        self.host._render_items.side_effect = render
+        await self.host.check_ranking_updates()
+        self.assertEqual(rendered, [["2", "3", "9"], ["3", "9"]])
+        self.send.assert_awaited_once_with(origin, "3,9")
+        self.assertEqual(self.host._random_push_recent[origin], ["2", "3", "9"])
+        self.save.assert_called_once()
 
 
 if __name__ == "__main__":

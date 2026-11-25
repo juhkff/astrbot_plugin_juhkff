@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from collections.abc import AsyncGenerator
+from copy import copy
 from sys import maxsize
 from typing import cast
 
@@ -53,6 +55,7 @@ from astrbot.api.event import (  # noqa: E402
     MessageEventResult,
     filter,
 )
+from astrbot.api.platform import MessageType  # noqa: E402
 from astrbot.api.star import Context, Star, register  # noqa: E402
 from astrbot.core.config.runtime import current_message_config  # noqa: E402
 from astrbot.core.pipeline.process_stage.method.agent_request import (  # noqa: E402
@@ -336,6 +339,133 @@ class JuhkffPlugin(Star):
         module = cast(GroupChatModule, self.modules["group_chat"])
         with ModuleLogger(module).scope():
             await module.after_sent(event)
+
+    async def _execute_pixiv_tool(self, event: AstrMessageEvent, command: str) -> str:
+        """Run one normalized browse request and send its reply to the source group.
+
+        Args:
+            event: Original event used only for admission and final delivery.
+            command: Canonical browse command built by one of the three tools.
+
+        Returns:
+            A concise delivery result or the browser's exact failure message.
+        """
+        module = cast(PixivPushModule, self.modules["pixiv_push"])
+        with ModuleLogger(module).scope():
+            if not self.global_enabled or not module.enabled or module._stopped:
+                return "Pixiv 功能已停用。"
+            if event.is_stopped():
+                return "当前消息已停止处理，未执行 Pixiv 请求。"
+            if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                return "Pixiv 浏览仅限群聊使用。"
+            try:
+                await self._ensure_started()
+                if not self.global_enabled or not module.enabled or module._stopped:
+                    return "Pixiv 功能已停用。"
+                if event.is_stopped():
+                    return "当前消息已停止处理，未执行 Pixiv 请求。"
+                if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                    return "Pixiv 浏览仅限群聊使用。"
+                # The browser reads command text; isolate it from the LLM's event.
+                browse_event = copy(event)
+                browse_event._extras = event._extras.copy()
+                browse_event.message_str = command
+                chain = await module.handle_browse(browse_event)
+                if not self.global_enabled or not module.enabled or module._stopped:
+                    return "Pixiv 功能已停用，未发送浏览结果。"
+                if event.is_stopped():
+                    return "当前消息已停止处理，未发送 Pixiv 浏览结果。"
+                if event.get_message_type() != MessageType.GROUP_MESSAGE:
+                    return "Pixiv 浏览仅限群聊使用。"
+                if chain is None or not chain.chain:
+                    return "Pixiv 未返回可发送的浏览结果。"
+                # Browser failures use plain_result; successful URL-only artwork
+                # replies remain MessageChain and must count as successful browsing.
+                failure = (
+                    chain.get_plain_text()
+                    if isinstance(chain, MessageEventResult)
+                    else None
+                )
+            except Exception:
+                logger.exception("[juhkff] Pixiv tool browse request failed")
+                return "Pixiv 请求或图片下载失败，请稍后重试。"
+            try:
+                sent = await event.send(chain)
+                if sent is False:
+                    logger.warning("[juhkff] Pixiv tool delivery returned False")
+                    return "Pixiv 消息发送失败，未确认送达。"
+            except Exception as exc:
+                logger.exception("[juhkff] Pixiv tool delivery failed")
+                if isinstance(exc, TimeoutError) or "timeout" in str(exc).casefold():
+                    return "Pixiv 消息发送超时，尚未确认送达，请先检查群内是否已收到。"
+                return "Pixiv 消息发送失败，请检查 QQ 协议端日志。"
+            return failure or "Pixiv 浏览结果已发送到当前群聊。"
+
+    @filter.llm_tool(name="juhkff_pixiv_ranking")
+    async def juhkff_pixiv_ranking(
+        self, event: AstrMessageEvent, mode: str = "daily"
+    ) -> str:
+        """Send Pixiv's daily, weekly, or monthly artwork ranking to this group.
+
+        Use when the user asks to browse a Pixiv ranking. The group's configured
+        artwork content policy and display settings apply.
+
+        Args:
+            mode (string): Ranking period: daily, weekly, or monthly. Defaults to daily.
+        """
+        commands = {
+            "daily": "#pixiv日榜",
+            "weekly": "#pixiv周榜",
+            "monthly": "#pixiv月榜",
+        }
+        if not isinstance(mode, str) or mode.strip().lower() not in commands:
+            return "榜单类型无效，请使用 daily、weekly 或 monthly。"
+        return await self._execute_pixiv_tool(event, commands[mode.strip().lower()])
+
+    @filter.llm_tool(name="juhkff_pixiv_random")
+    async def juhkff_pixiv_random(
+        self, event: AstrMessageEvent, keyword: str = ""
+    ) -> str:
+        """Send random Pixiv artwork, optionally matching a tag or search keyword.
+
+        Use for requests to discover artwork or illustrations. Results follow
+        the current group's configured artwork content policy and display settings.
+
+        Args:
+            keyword (string): Optional artwork tag or search phrase; empty uses rankings.
+        """
+        if not isinstance(keyword, str):
+            return "搜索关键词必须是字符串。"
+        # Treat multiline text as one search phrase, never as extra commands.
+        keyword = " ".join(keyword.split())
+        return await self._execute_pixiv_tool(event, f"#pixiv随机 {keyword}".rstrip())
+
+    @filter.llm_tool(name="juhkff_pixiv_artwork")
+    async def juhkff_pixiv_artwork(
+        self, event: AstrMessageEvent, artwork_id: str, page: int = 0
+    ) -> str:
+        """Send a specific Pixiv artwork by numeric ID or Pixiv artwork URL.
+
+        Use when the user identifies an artwork to view. The current group's
+        configured artwork content policy and display settings apply.
+
+        Args:
+            artwork_id (string): Numeric artwork ID or a pixiv.net/artworks URL.
+            page (number): One-based image number; zero sends all pages. Defaults to zero.
+        """
+        if not isinstance(artwork_id, str):
+            return "作品参数无效，请提供数字 ID 或 Pixiv 作品链接。"
+        match = re.fullmatch(
+            r"(?:([0-9]+)|https?://(?:www\.)?pixiv\.net/"
+            r"(?:[a-z]{2}/)?artworks/([0-9]+)(?:\?[^\s]*)?)",
+            artwork_id.strip(),
+        )
+        if match is None or not (iid := (match.group(1) or match.group(2)).lstrip("0")):
+            return "作品参数无效，请提供数字 ID 或 Pixiv 作品链接。"
+        if isinstance(page, bool) or not isinstance(page, int) or page < 0:
+            return "页码无效，请使用非负整数（0 表示全部图片，1 表示第一张）。"
+        suffix = f" 第{page}张" if page else ""
+        return await self._execute_pixiv_tool(event, f"#pixiv作品 {iid}{suffix}")
 
     # ------------------------------------------------------------ 指令
 

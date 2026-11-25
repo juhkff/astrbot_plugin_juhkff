@@ -293,7 +293,7 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                     self.host._translate_image_content = AsyncMock(side_effect=retry)
 
                 async def short_timeout(awaitable, timeout):
-                    self.assertEqual(timeout, 60)
+                    self.assertEqual(timeout, 120)
                     return await original_wait_for(awaitable, timeout=0.01)
 
                 with patch.object(

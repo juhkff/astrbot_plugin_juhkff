@@ -126,6 +126,117 @@ class PixivTypesetTests(unittest.TestCase):
                     ).getbbox()
                 )
 
+    def test_large_oval_boundary_is_preserved_when_interior_is_used(self):
+        self.source = Image.new("RGB", (1200, 1200), (80, 80, 80))
+        draw = ImageDraw.Draw(self.source)
+        draw.ellipse((120, 120, 1079, 1079), fill="white", outline="black", width=5)
+        draw.rectangle((560, 560, 570, 570), fill="black")
+        region = dict(
+            self.region,
+            bbox=[400, 400, 600, 600],
+            bubble=[100, 100, 900, 900],
+            text="Hi",
+        )
+        result = self.render([region])
+        self.assertEqual(result.size, self.source.size)
+        self.assertEqual(result.getpixel((565, 565)), (255, 255, 255))
+        # Every pixel on and outside the oval outline survives the erase.
+        mask = Image.new("L", self.source.size, 255)
+        ImageDraw.Draw(mask).ellipse((125, 125, 1074, 1074), fill=0)
+        self.assertIsNone(
+            ImageChops.multiply(
+                ImageChops.difference(result, self.source).convert("L"), mask
+            ).getbbox()
+        )
+
+    def test_overwide_bubble_shrinks_away_from_art(self):
+        draw = ImageDraw.Draw(self.source)
+        draw.rectangle((40, 80, 65, 200), fill="red")
+        draw.rectangle((110, 140, 120, 150), fill="black")
+        region = dict(self.region, bubble=[100, 200, 800, 500], text="Hi")
+        result = self.render([region])
+        self.assertEqual(result.size, self.source.size)
+        self.assertEqual(result.getpixel((115, 145)), (255, 255, 255))
+        self.assertIsNone(
+            ImageChops.difference(
+                result.crop((40, 80, 66, 201)), self.source.crop((40, 80, 66, 201))
+            ).getbbox()
+        )
+
+    def test_small_note_below_avoids_art_in_old_fixed_height(self):
+        ImageDraw.Draw(self.source).rectangle((0, 240, 399, 399), fill="red")
+        result = self.render([dict(self.region, text="Hi")])
+        self.assertEqual(result.size, self.source.size)
+        changed = ImageChops.difference(result, self.source).getbbox()
+        self.assertGreaterEqual(changed[1], 184)
+        self.assertLess(changed[3], 240)
+        self.assertIsNone(
+            ImageChops.difference(
+                result.crop((0, 240, 400, 400)), self.source.crop((0, 240, 400, 400))
+            ).getbbox()
+        )
+
+    def test_narrow_source_can_use_wider_compact_note(self):
+        ImageDraw.Draw(self.source).rectangle((0, 240, 399, 399), fill="red")
+        region = dict(self.region, bbox=[450, 250, 475, 450], text="Wide note here")
+        result = self.render([region])
+        self.assertEqual(result.size, self.source.size)
+        changed = ImageChops.difference(result, self.source).getbbox()
+        self.assertGreater(changed[2] - changed[0], 10)
+        self.assertGreaterEqual(changed[1], 184)
+        self.assertLess(changed[3], 240)
+
+    def test_vertical_note_chooses_left_when_right_has_art(self):
+        ImageDraw.Draw(self.source).rectangle((204, 0, 399, 399), fill="red")
+        region = dict(self.region, direction="vertical", text="ABC")
+        result = self.render([region])
+        self.assertEqual(result.size, self.source.size)
+        changed = ImageChops.difference(result, self.source).getbbox()
+        self.assertLessEqual(changed[2], 96)
+        self.assertIsNone(
+            ImageChops.difference(
+                result.crop((204, 0, 400, 400)), self.source.crop((204, 0, 400, 400))
+            ).getbbox()
+        )
+
+    def test_unrendered_bubble_blocks_other_notes(self):
+        # The first note's entire available space belongs to a later bubble.
+        second = dict(
+            self.region,
+            bbox=[700, 700, 800, 800],
+            bubble=[0, 460, 1000, 1000],
+            text="Later",
+        )
+        result = self.render([self.region, second])
+        self.assertGreater(result.width, 400)
+        # The later bubble may render its own text; the first must be in margin.
+        self.assertIsNone(
+            ImageChops.difference(
+                result.crop((100, 184, 200, 260)),
+                self.source.crop((100, 184, 200, 260)),
+            ).getbbox()
+        )
+
+    def test_occupied_note_rectangles_do_not_overlap(self):
+        second = dict(self.region, bbox=[260, 250, 510, 450], text="Second")
+        self.source.save(self.path)
+        placements = []
+        search = typeset._local_placement
+
+        def tracked(*args):
+            result = search(*args)
+            if result[0]:
+                rect = result[0][0]
+                self.assertFalse(
+                    any(typeset._intersects(rect, old) for old in placements)
+                )
+                placements.append(rect)
+            return result
+
+        with patch.object(typeset, "_local_placement", side_effect=tracked):
+            typeset.render_translation(self.path, [self.region, second], FONT)
+        self.assertTrue(placements)
+
     def test_bad_font_and_missing_chinese_glyphs_fail_clearly(self):
         self.source.save(self.path)
         with self.assertRaisesRegex(ValueError, "No usable font"):
@@ -199,8 +310,62 @@ class PixivTypesetTests(unittest.TestCase):
     def test_background_inspection_budget_is_bounded(self):
         Image.new("RGB", (2200, 2200), "white").save(self.path)
         region = dict(self.region, bubble=[0, 0, 1000, 1000])
-        with self.assertRaisesRegex(ValueError, "inspection exceeds pixel budget"):
-            typeset.render_translation(self.path, [region], FONT)
+        inspected = 0
+        check = typeset._flat_background
+
+        def counted(image, rect, text_rect=None):
+            nonlocal inspected
+            inspected += (rect[2] - rect[0]) * (rect[3] - rect[1])
+            return check(image, rect, text_rect)
+
+        # Oversized candidates are skipped so smaller safe interiors still work.
+        with patch.object(typeset, "_flat_background", side_effect=counted):
+            output = typeset.render_translation(self.path, [region], FONT)
+        self.assertLessEqual(inspected, 4_000_000)
+        with Image.open(output) as result:
+            self.assertEqual(result.size, (2200, 2200))
+
+    def test_exhausted_candidate_search_preserves_sidebar_fallback(self):
+        self.source = Image.new("RGB", (2200, 2200), "white")
+        draw = ImageDraw.Draw(self.source)
+        for y in range(16, 2200, 24):
+            draw.line((0, y, 2199, y), fill="black")
+        self.source.save(self.path)
+        inspected = 0
+        check = typeset._flat_background
+
+        def counted(image, rect, text_rect=None):
+            nonlocal inspected
+            inspected += (rect[2] - rect[0]) * (rect[3] - rect[1])
+            return check(image, rect, text_rect)
+
+        region = dict(self.region, bubble=[0, 0, 1000, 1000])
+        with patch.object(typeset, "_flat_background", side_effect=counted):
+            output = typeset.render_translation(self.path, [region], FONT)
+        self.assertGreater(inspected, 0)
+        self.assertLessEqual(inspected, 4_000_000)
+        with Image.open(output) as result:
+            self.assertGreater(result.width, 2200)
+            self.assertIsNone(
+                ImageChops.difference(
+                    result.crop((0, 0, 2200, 2200)), self.source
+                ).getbbox()
+            )
+
+    def test_blank_note_prefers_readable_font_over_smallest_rectangle(self):
+        self.source.save(self.path)
+        selected = []
+        search = typeset._local_placement
+
+        def tracked(*args):
+            result = search(*args)
+            if result[0]:
+                selected.append(result[0][3].size)
+            return result
+
+        with patch.object(typeset, "_local_placement", side_effect=tracked):
+            typeset.render_translation(self.path, [self.region], FONT)
+        self.assertEqual(selected, [32])
 
     def test_auto_detected_cjk_font_renders_chinese_and_japanese(self):
         if not any(Path(p).is_file() for p in typeset.FONT_CANDIDATES):

@@ -148,6 +148,170 @@ def _flat_background(image, rect, text_rect=None):
     return bg
 
 
+def _local_placement(original, entry, index, boxes, bubbles, occupied, fonts, budget):
+    """Search bounded interior and nearby rectangles without relaxing ink checks.
+
+    Args:
+        original: Immutable RGB source.
+        entry: Validated translation.
+        index: Current region index.
+        boxes: All source text rectangles.
+        bubbles: All declared bubble boundaries, including unrendered ones.
+        occupied: Previously placed translations.
+        fonts: Descending font sizes to try.
+        budget: Remaining pixel inspection allowance.
+
+    Returns:
+        A placement tuple or None, and the remaining inspection allowance.
+    """
+    width, height = original.size
+    box, bubble = boxes[index], bubbles[index]
+    left, top, right, bottom = box
+    candidates = []
+    if bubble:
+        # The model supplies a boundary, not proof that its corners are blank.
+        # Shrink each axis independently while retaining source ink and padding.
+        inner = (left - 4, top - 4, right + 4, bottom + 4)
+        if all(
+            (
+                inner[0] >= bubble[0],
+                inner[1] >= bubble[1],
+                inner[2] <= bubble[2],
+                inner[3] <= bubble[3],
+            )
+        ):
+            interiors = set()
+            for fx in (0, 0.25, 0.5, 0.75, 1):
+                for fy in (0, 0.25, 0.5, 0.75, 1):
+                    interiors.add(
+                        (
+                            round(bubble[0] + (inner[0] - bubble[0]) * fx),
+                            round(bubble[1] + (inner[1] - bubble[1]) * fy),
+                            round(bubble[2] + (inner[2] - bubble[2]) * fx),
+                            round(bubble[3] + (inner[3] - bubble[3]) * fy),
+                        )
+                    )
+            # Larger safe interiors can accommodate more text at readable sizes.
+            candidates.extend(
+                (rect, True)
+                for rect in sorted(
+                    interiors, key=lambda r: (-(r[2] - r[0]) * (r[3] - r[1]), r)
+                )
+            )
+    vertical = entry["direction"] == "vertical"
+    anchor = bubble or box
+    nearby = {}
+    source_span = (bottom - top) if vertical else (right - left)
+    page_span = height if vertical else width
+    spans = sorted(
+        {
+            max(32, source_span),
+            *(max(32, round(page_span * ratio)) for ratio in (0.12, 0.2, 0.32, 0.5)),
+        }
+    )
+    for span in spans:
+        # Derive compact rectangles from actual wrapping at several readable
+        # sizes. No large empty tail is included in the background inspection.
+        for font in (fonts[0], fonts[8], fonts[14], fonts[-1]):
+            limit = min(width if vertical else height, max(64, round(page_span * 0.6)))
+            layout = _layout(
+                entry["text"],
+                font,
+                limit - 8 if vertical else span - 8,
+                span - 8 if vertical else limit - 8,
+                vertical,
+            )
+            if layout is None:
+                continue
+            cell = font.size + 4
+            if vertical:
+                last_column = min(x + font.getbbox(char)[0] for x, _, char in layout)
+                columns = (limit - 8 - cell - last_column) // cell + 1
+                extent = columns * cell + 8
+                # Right first, then left; grow columns and available height.
+                for gap in sorted({4, max(8, width // 100), max(16, width // 50)}):
+                    for edge in (anchor[2] + gap, anchor[0] - gap):
+                        x = edge if edge > right else edge - extent
+                        for y in (top, (top + bottom - span) // 2, bottom - span):
+                            rect = (
+                                max(0, x),
+                                max(0, y),
+                                min(width, x + extent),
+                                min(height, y + span),
+                            )
+                            nearby[rect] = max(font.size, nearby.get(rect, 0))
+            else:
+                last_row = max(y + font.getbbox(char)[1] for _, y, char in layout)
+                rows = last_row // cell + 1
+                extent = rows * cell + 8
+                for gap in sorted({4, max(8, height // 100), max(16, height // 50)}):
+                    for x in (left, (left + right - span) // 2, right - span):
+                        y = anchor[3] + gap
+                        rect = (
+                            max(0, x),
+                            y,
+                            min(width, x + span),
+                            min(height, y + extent),
+                        )
+                        nearby[rect] = max(font.size, nearby.get(rect, 0))
+    # Prefer readable fonts, then compact notes near the source at that size.
+    candidates.extend(
+        (rect, False)
+        for rect in sorted(
+            nearby,
+            key=lambda r: (
+                -nearby[r],
+                int(vertical and r[2] <= anchor[0]),
+                (r[2] - r[0]) * (r[3] - r[1]),
+                abs(r[0] - right) if vertical else abs(r[0] - left),
+                r,
+            ),
+        )
+    )
+    for rect, erase in candidates:
+        w, h = rect[2] - rect[0], rect[3] - rect[1]
+        if w < 24 or h < 24 or w * h > budget:
+            continue
+        if any(_intersects(rect, other) for other in occupied):
+            continue
+        if any(
+            _intersects(rect, other)
+            for j, other in enumerate(boxes)
+            if not erase or j != index
+        ):
+            continue
+        if any(
+            other and _intersects(rect, other)
+            for j, other in enumerate(bubbles)
+            if not erase or j != index
+        ):
+            continue
+        # Layout before scanning prevents spending the budget on unusable sizes.
+        for font in fonts:
+            layout = _layout(entry["text"], font, w - 8, h - 8, vertical)
+            if layout is not None:
+                break
+        else:
+            continue
+        # Cheap corner rejection avoids spending a full scan on oval outlines.
+        # This only rejects candidates; acceptance still checks every pixel.
+        corners = [
+            original.getpixel((x, y))
+            for x in (rect[0], rect[2] - 1)
+            for y in (rect[1], rect[3] - 1)
+        ]
+        budget -= 4
+        if any(min(c) < 180 or max(c) - min(c) > 20 for c in corners):
+            continue
+        if w * h > budget:
+            continue
+        budget -= w * h
+        background = _flat_background(original, rect, box if erase else None)
+        if background is not None:
+            return (rect, erase, background, font, layout), budget
+    return None, budget
+
+
 def render_translation(image: Path, regions: list[dict], font_path: str = "") -> Path:
     """Render validated translations without overwriting the source image.
 
@@ -251,7 +415,7 @@ def render_translation(image: Path, regions: list[dict], font_path: str = "") ->
     digest = hashlib.sha256(source_bytes)
     digest.update(json.dumps(cleaned, ensure_ascii=False, sort_keys=True).encode())
     digest.update(selected_font)
-    digest.update(b"pixiv-typeset-v1")
+    digest.update(b"pixiv-typeset-v2")
     output = image.parent / f"{image.stem}.translated-{digest.hexdigest()}.png"
     # Even an input named like a previous output must never be replaced.
     if output == image:
@@ -275,84 +439,26 @@ def render_translation(image: Path, regions: list[dict], font_path: str = "") ->
     draw = ImageDraw.Draw(rendered)
     occupied = []
     pending = []
-    checked_pixels = 0
+    budget = 4_000_000
+    fonts = [
+        ImageFont.truetype(io.BytesIO(selected_font), size)
+        for size in range(32, 11, -1)
+    ]
     for index, entry in enumerate(cleaned):
-        box, bubble = boxes[index], bubbles[index]
-        candidates = []
-        if (
-            bubble
-            and not any(
-                _intersects(bubble, other)
-                for j, other in enumerate(boxes)
-                if j != index
-            )
-            and not any(
-                other and _intersects(bubble, other)
-                for j, other in enumerate(bubbles)
-                if j != index
-            )
-        ):
-            candidates.append((bubble, True))
-        left, top, right, bottom = box
-        if entry["direction"] == "horizontal":
-            candidates.append(
-                (
-                    (left, min(height, bottom + 4), right, min(height, bottom + 244)),
-                    False,
-                )
-            )
-        else:
-            candidates.extend(
-                [
-                    ((right + 4, top, min(width, right + 204), bottom), False),
-                    ((max(0, left - 204), top, max(0, left - 4), bottom), False),
-                ]
-            )
-        placed = False
-        for rect, erase in candidates:
-            if rect[0] >= rect[2] or rect[1] >= rect[3]:
-                continue
-            if any(_intersects(rect, other) for other in occupied):
-                continue
-            if not erase and any(_intersects(rect, other) for other in boxes):
-                continue
-            checked_pixels += (rect[2] - rect[0]) * (rect[3] - rect[1])
-            if checked_pixels > 4_000_000:
-                raise ValueError(
-                    "translation background inspection exceeds pixel budget"
-                )
-            background = _flat_background(original, rect, box if erase else None)
-            if background is None:
-                continue
-            for size in range(32, 11, -1):
-                font = ImageFont.truetype(io.BytesIO(selected_font), size)
-                layout = _layout(
-                    entry["text"],
-                    font,
-                    rect[2] - rect[0] - 8,
-                    rect[3] - rect[1] - 8,
-                    entry["direction"] == "vertical",
-                )
-                if layout is not None:
-                    if erase:
-                        draw.rectangle(
-                            (rect[0], rect[1], rect[2] - 1, rect[3] - 1),
-                            fill=background,
-                        )
-                    for x, y, char in layout:
-                        draw.text(
-                            (rect[0] + 4 + x, rect[1] + 4 + y),
-                            char,
-                            font=font,
-                            fill="black",
-                        )
-                    occupied.append(rect)
-                    placed = True
-                    break
-            if placed:
-                break
-        if not placed:
+        placement, budget = _local_placement(
+            original, entry, index, boxes, bubbles, occupied, fonts, budget
+        )
+        if placement is None:
             pending.append((index + 1, entry))
+            continue
+        rect, erase, background, font, layout = placement
+        if erase:
+            draw.rectangle(
+                (rect[0], rect[1], rect[2] - 1, rect[3] - 1), fill=background
+            )
+        for x, y, char in layout:
+            draw.text((rect[0] + 4 + x, rect[1] + 4 + y), char, font=font, fill="black")
+        occupied.append(rect)
     if pending:
         sidebar_width = 480
         font = ImageFont.truetype(io.BytesIO(selected_font), 20)
