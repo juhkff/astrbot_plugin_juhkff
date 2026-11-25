@@ -18,7 +18,7 @@ from PIL import Image as PILImage
 from pixiv_test_utils import page_nodes
 from test_pixiv_browse import BrowseHost, awaited, item, must
 
-from astrbot.api.message_components import ComponentType, Plain
+from astrbot.api.message_components import ComponentType, Nodes, Plain
 
 
 class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
@@ -380,9 +380,15 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                         [item(restriction=restriction)], self.umo
                     )
                 )
-                self.assertTrue(all(isinstance(part, Plain) for part in result.chain))
-                self.assertIn("https://i.pximg.net/7.png", result.chain[0].text)
-                self.assertEqual(result.chain[-1].text, "\n图片文字翻译：\nHello")
+                self.assertEqual(len(result.chain), 2)
+                self.assertIsInstance(result.chain[0], Plain)
+                self.assertEqual(result.chain[0].text, "------- NSFW -------")
+                self.assertIsInstance(result.chain[1], Nodes)
+                self.assertEqual(len(result.chain[1].nodes), 1)
+                content = result.chain[1].nodes[0].content
+                self.assertTrue(all(isinstance(part, Plain) for part in content))
+                self.assertIn("https://i.pximg.net/7.png", content[0].text)
+                self.assertEqual(content[-1].text, "\n图片文字翻译：\nHello")
                 self.assertNotIn(
                     "regions",
                     awaited(self.context.llm_generate).kwargs["system_prompt"],

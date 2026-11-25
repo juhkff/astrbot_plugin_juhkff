@@ -153,13 +153,15 @@ class PixivDualRankingTests(IsolatedAsyncioTestCase):
         with patch.object(browse.random, "shuffle", lambda rows: None):
             result = must(await self.host.handle_browse(event("#pixiv随机")))
         self.host._browse_candidates.assert_awaited_once_with("daily", 2, "")
-        self.assertFalse(
-            any(
+        self.assertEqual(
+            sum(
                 isinstance(part, Plain) and part.text == SEPARATOR
                 for node in result.chain[0].nodes
                 for part in node.content
-            )
+            ),
+            1,
         )
+        self.assertEqual(result.chain[0].nodes[1].content[0].text, SEPARATOR)
         self.host._browse_candidates.reset_mock()
         await self.host.handle_browse(event("#pixiv作品 8"))
         self.host._browse_candidates.assert_not_awaited()

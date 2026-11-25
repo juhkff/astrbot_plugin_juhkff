@@ -193,6 +193,84 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_single_restricted_page_always_uses_forward(self):
+        for restriction in (1, 2):
+            for display in ("image", "link"):
+                for transport in ("base64", "file"):
+                    with self.subTest(
+                        restriction=restriction, display=display, transport=transport
+                    ):
+                        self.host._content_policy.return_value = (False, display)
+                        self.host.cfg["image_transport"] = transport
+                        result = await self.host._render_items(
+                            [item(restriction=restriction)], self.umo
+                        )
+                        self.assertEqual(len(must(result).chain), 2)
+                        self.assertIsInstance(at(result), Plain)
+                        self.assertEqual(at(result).text, "------- NSFW -------")
+                        forward = at(result, 1)
+                        self.assertIsInstance(forward, Nodes)
+                        self.assertEqual(len(forward.nodes), 1)
+                        content = forward.nodes[0].content
+                        self.assertIn(
+                            "【R18】" if restriction == 1 else "【R18-G】",
+                            content[0].text,
+                        )
+                        if display == "link":
+                            self.assertEqual(len(content), 1)
+                            self.assertIn("https://i.pximg.net/7.png", content[0].text)
+                        else:
+                            self.assertEqual(len(content), 2)
+                            self.assertEqual(content[1].type.value, "Image")
+                        self.assertNotIn("NSFW", str(forward))
+
+    async def test_single_restricted_warning_is_sent_before_forward(self):
+        self.host._content_policy.return_value = (False, "link")
+        result = must(await self.host._render_items([item(restriction=1)], self.umo))
+        calls = []
+
+        async def send_plain(*args):
+            calls.append(("plain", args[-1][0]["data"]["text"]))
+
+        async def send_forward(action, **kwargs):
+            calls.append((action, kwargs["group_id"]))
+
+        bot = SimpleNamespace(call_action=AsyncMock(side_effect=send_forward))
+        with (
+            patch.object(
+                AiocqhttpMessageEvent, "_dispatch_send", side_effect=send_plain
+            ),
+            patch(
+                "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await AiocqhttpMessageEvent.send_message(
+                bot, result, is_group=True, session_id="1"
+            )
+        self.assertEqual(
+            calls,
+            [("plain", "------- NSFW -------"), ("send_group_forward_msg", "1")],
+        )
+
+    async def test_ranking_defaults_to_three_and_preserves_explicit_count(self):
+        self.host._browse_candidates = AsyncMock(
+            return_value=[(str(i), i) for i in range(1, 8)]
+        )
+        self.host._render_items = AsyncMock(return_value=MessageChain([Plain("ok")]))
+        for mode in ("daily", "weekly", "monthly"):
+            for configured, expected in ((None, 3), ("invalid", 3), (5, 5)):
+                with self.subTest(mode=mode, configured=configured):
+                    self.host.cfg["ranking"] = (
+                        {} if configured is None else {"count": configured}
+                    )
+                    await self.host._browse_selection(self.umo, mode=mode)
+                    selected = awaited(self.host._render_items).args[0]
+                    self.assertEqual(
+                        [work["id"] for work in selected],
+                        [str(i) for i in range(1, expected + 1)],
+                    )
+
     async def test_statistics_display_once_in_direct_and_forwarded_works(self):
         for pages, restriction in ((1, 0), (3, 0), (3, 1)):
             with self.subTest(pages=pages, restriction=restriction):
@@ -226,8 +304,9 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                             self.umo,
                             ranks={"7": 4},
                         )
+                        first = at(result, 1 if restriction and pages == 1 else 0)
                         serialized = json.dumps(
-                            await at(result).to_dict(), ensure_ascii=False
+                            await first.to_dict(), ensure_ascii=False
                         )
                         for candidate in ("【R18】", "【R18-G】"):
                             self.assertEqual(
@@ -236,8 +315,11 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                         if label:
                             self.assertIn(label + "\\n排名：#4", serialized)
                         if pages == 1:
+                            caption = (
+                                first.nodes[0].content[0] if restriction else at(result)
+                            )
                             self.assertTrue(
-                                at(result).text.startswith(
+                                caption.text.startswith(
                                     label + "\n" if label else "排名："
                                 )
                             )
@@ -411,6 +493,126 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                     json.dumps(works, ensure_ascii=False), r"第\s*\d+/\d+\s*张"
                 )
 
+    async def test_unflagged_mixed_ratings_keep_stable_sections_and_albums(self):
+        works = [
+            item("1", restriction=1),
+            item("2", pages=2),
+            item("3", pages=3, restriction=2),
+            item("4"),
+            item("5", pages=2, restriction=1),
+            item("6", pages=2),
+        ]
+        ranks = {work["id"]: index for index, work in enumerate(works, 11)}
+        expected = ["2", "4", "6", None, "1", "3", "5"]
+        for transport in ("file", "base64"):
+            for display in ("image", "link"):
+                with self.subTest(transport=transport, display=display):
+                    host = BrowseHost(self.image)
+                    host.cfg["image_transport"] = transport
+                    host._content_policy.return_value = (False, display)
+                    with patch.object(browse, "_FORWARD_BATCH_BYTES", 1):
+                        result = must(
+                            await host._render_items(
+                                works, self.umo, ranks=ranks, bot_id="123"
+                            )
+                        )
+                    self.assertEqual(len(result.chain), 1)
+                    forward = at(result)
+                    self.assertIsInstance(forward, Nodes)
+                    self.assertEqual(len(forward.nodes), len(expected))
+                    payload = json.dumps(await forward.to_dict(), ensure_ascii=False)
+                    self.assertEqual(
+                        payload.count("---------------- NSFW ----------------"), 1
+                    )
+                    for node, iid in zip(forward.nodes, expected):
+                        if iid is None:
+                            self.assertEqual(len(node.content), 1)
+                            self.assertIsInstance(node.content[0], Plain)
+                            self.assertEqual(
+                                node.content[0].text,
+                                "---------------- NSFW ----------------",
+                            )
+                            continue
+                        work = next(work for work in works if work["id"] == iid)
+                        caption = node.content[0]
+                        if isinstance(caption, Node):
+                            caption = caption.content[0]
+                        self.assertIsInstance(caption, Plain)
+                        self.assertIn(f"/artworks/{iid}\n", caption.text)
+                        self.assertIn(f"排名：#{ranks[iid]}", caption.text)
+                        self.assertEqual(payload.count(f"/artworks/{iid}\\n"), 1)
+                        pages = page_nodes([node])
+                        self.assertEqual(len(pages), work["page_count"])
+                        for page in pages:
+                            if work["x_restrict"] and display == "link":
+                                self.assertFalse(
+                                    any(
+                                        part.type.value == "Image"
+                                        for part in page.content
+                                    )
+                                )
+                            else:
+                                self.assertEqual(page.content[-1].type.value, "Image")
+
+    async def test_failed_mixed_work_recomputes_actual_sections(self):
+        for survivor in ("restricted", "sfw", "mixed", "none"):
+            with self.subTest(survivor=survivor):
+                host = BrowseHost(self.image)
+                host._content_policy.return_value = (False, "image")
+                works = [
+                    item("1", pages=2, restriction=2),
+                    item("2", pages=2),
+                    item("3", restriction=1),
+                ]
+                failed_ids = {
+                    "restricted": {"1", "2"},
+                    "sfw": {"1", "3"},
+                    "mixed": {"1"},
+                    "none": {"1", "2", "3"},
+                }[survivor]
+
+                async def download(work, *args, **kwargs):
+                    # Let one page succeed first: the entire failed album must vanish.
+                    if work["id"] in failed_ids and (
+                        work["page_count"] == 1 or args[1] == 1
+                    ):
+                        raise RuntimeError("Fixture failed album page")
+                    return self.image
+
+                host._download.side_effect = download
+                failed = set()
+                result = await host._render_items(
+                    works, self.umo, failed_work_ids=failed, bot_id="123"
+                )
+                self.assertEqual(failed, failed_ids)
+                if survivor == "none":
+                    self.assertIsNone(result)
+                    continue
+                if survivor == "restricted":
+                    self.assertEqual(len(must(result).chain), 2)
+                    self.assertEqual(at(result).text, "------- NSFW -------")
+                    forward = at(result, 1)
+                else:
+                    self.assertEqual(len(must(result).chain), 1)
+                    forward = at(result)
+                self.assertIsInstance(forward, Nodes)
+                payload = json.dumps(await forward.to_dict(), ensure_ascii=False)
+                for iid in failed_ids:
+                    self.assertNotIn(f"/artworks/{iid}", payload)
+                self.assertEqual(
+                    payload.count("---------------- NSFW ----------------"),
+                    int(survivor == "mixed"),
+                )
+                if survivor == "mixed":
+                    self.assertLess(payload.index("/artworks/2"), payload.index("NSFW"))
+                    self.assertLess(payload.index("NSFW"), payload.index("/artworks/3"))
+                elif survivor == "sfw":
+                    self.assertNotIn("NSFW", payload)
+                    self.assertEqual(len(page_nodes(forward.nodes)), 2)
+                else:
+                    self.assertNotIn("NSFW", payload)
+                    self.assertEqual(len(page_nodes(forward.nodes)), 1)
+
     async def test_base64_batch_boundaries_keep_every_work_page_in_order(self):
         self.host.cfg["image_transport"] = "base64"
         images = {}
@@ -496,7 +698,7 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             self.assertIn(f"/artworks/{index}\n", caption.text)
             self.assertEqual(node.uin, "123")
 
-    async def test_onebot_sends_separate_bounded_requests_with_original_bytes(self):
+    async def test_onebot_sends_one_mixed_forward_with_original_bytes(self):
         self.host._content_policy.return_value = (False, "link")
         works = [item(str(i), restriction=i % 2) for i in range(1, 13)]
         with patch.object(browse, "_FORWARD_BATCH_BYTES", 4096):
@@ -508,16 +710,20 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
             is_group=True,
             session_id="1",
         )
-        self.assertGreater(action.await_count, 1)
-        nodes = []
+        action.assert_awaited_once()
+        call = awaited(action)
+        self.assertEqual(call.args[0], "send_group_forward_msg")
+        self.assertEqual(call.kwargs["group_id"], "1")
+        nodes = call.kwargs["messages"]
+        self.assertEqual(len(nodes), 13)
+        self.assertEqual(
+            nodes[6]["data"]["content"][0]["data"]["text"],
+            "---------------- NSFW ----------------",
+        )
         images = links = 0
-        for call in action.await_args_list:
-            self.assertEqual(call.args[0], "send_group_forward_msg")
-            self.assertEqual(call.kwargs["group_id"], "1")
-            self.assertLessEqual(len(json.dumps(call.kwargs).encode()), 4096)
-            nodes.extend(call.kwargs["messages"])
-        self.assertEqual(len(nodes), 12)
-        for index, node in enumerate(nodes, 1):
+        work_nodes = nodes[:6] + nodes[7:]
+        order = list(range(2, 13, 2)) + list(range(1, 13, 2))
+        for index, node in zip(order, work_nodes):
             content = node["data"]["content"]
             self.assertIn(f"/artworks/{index}\n", content[0]["data"]["text"])
             if index % 2:
@@ -561,19 +767,23 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
                 host = BrowseHost(self.image)
                 host._content_policy.return_value = (False, "link")
                 result = await host._render_items(works, self.umo)
+                self.assertEqual(len(must(result).chain), 2 if count == 1 else 1)
+                forward = at(result, 1 if count == 1 else 0)
+                self.assertIsInstance(forward, Nodes)
+                self.assertEqual(len(page_nodes(forward.nodes)), count)
+                host._get_bot_id.assert_awaited_once_with(self.umo)
                 if count == 1:
-                    self.assertEqual(len(must(result).chain), 1)
-                    self.assertIsInstance(at(result), Plain)
-                    self.assertIn("https://i.pximg.net/7.png", at(result).text)
-                    host._get_bot_id.assert_not_awaited()
-                else:
-                    self.assertIsInstance(at(result), Nodes)
-                    self.assertEqual(len(page_nodes(at(result).nodes)), count)
-                    host._get_bot_id.assert_awaited_once_with(self.umo)
+                    self.assertEqual(at(result).text, "------- NSFW -------")
+                    self.assertIn(
+                        "https://i.pximg.net/7.png",
+                        forward.nodes[0].content[0].text,
+                    )
                 self.assertEqual(host._download.await_count, downloads)
         self.host._content_policy.return_value = (False, "image")
         result = await self.host._render_items([item(restriction=1)], self.umo)
-        self.assertIsInstance(at(result, 1), Image)
+        self.assertEqual(at(result).text, "------- NSFW -------")
+        self.assertIsInstance(at(result, 1), Nodes)
+        self.assertIsInstance(at(result, 1).nodes[0].content[1], Image)
 
     async def test_single_remaining_work_is_flat_in_every_transport_batch(self):
         for transport in ("file", "base64"):

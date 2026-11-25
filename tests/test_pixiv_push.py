@@ -18,7 +18,7 @@ from PIL import Image
 from pixiv_test_utils import page_nodes
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import ComponentType, Plain
+from astrbot.api.message_components import ComponentType, Nodes, Plain
 
 
 def awaited(mock: Any) -> Any:
@@ -658,12 +658,21 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         item = {**self.item(), "x_restrict": 1}
         self.module._fetch_detail = AsyncMock(return_value=item)
         self.module._download = AsyncMock()
+        self.module._get_bot_id = AsyncMock(return_value="123")
         self.assertTrue(await self.module._check_artist("7"))
         self.module._download.assert_not_awaited()
+        self.module._get_bot_id.assert_awaited_once_with(self.groups[1])
         self.plugin.context.send_message.assert_awaited_once()
         args = awaited(self.plugin.context.send_message).args
         self.assertEqual(args[0], self.groups[1])
-        self.assertIn(item["original"], "\n".join(c.text for c in args[1].chain))
+        self.assertEqual(len(args[1].chain), 2)
+        self.assertIsInstance(args[1].chain[0], Plain)
+        self.assertEqual(args[1].chain[0].text, "------- NSFW -------")
+        self.assertIsInstance(args[1].chain[1], Nodes)
+        self.assertEqual(len(args[1].chain[1].nodes), 1)
+        content = args[1].chain[1].nodes[0].content
+        self.assertTrue(all(isinstance(part, Plain) for part in content))
+        self.assertIn(item["original"], "\n".join(part.text for part in content))
 
     async def test_login_check_classifies_results_without_logging_credentials(self):
         cases = [

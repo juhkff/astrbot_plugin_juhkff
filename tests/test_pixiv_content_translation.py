@@ -185,7 +185,14 @@ class PixivContentTranslationTests(IsolatedAsyncioTestCase):
         self.host._translate_image_content = AsyncMock()
         self.host._content_policy.return_value = (False, "link")
         result = must(await self.host._render_items([item(restriction=1)], self.umo))
-        self.assertEqual(len(result.chain), 1)
+        self.assertEqual(len(result.chain), 2)
+        self.assertIsInstance(result.chain[0], Plain)
+        self.assertEqual(result.chain[0].text, "------- NSFW -------")
+        self.assertIsInstance(result.chain[1], Nodes)
+        self.assertEqual(len(result.chain[1].nodes), 1)
+        self.assertTrue(
+            all(isinstance(part, Plain) for part in result.chain[1].nodes[0].content)
+        )
         self.host._download.assert_not_awaited()
         self.host._translate_image_content.assert_not_awaited()
         self.context.get_current_chat_provider_id.assert_not_awaited()
@@ -230,8 +237,15 @@ class PixivContentTranslationTests(IsolatedAsyncioTestCase):
         self.host._download.side_effect = RuntimeError("OCR download unavailable")
         self.host._translate_image_content = AsyncMock()
         result = must(await self.host._render_items([item(restriction=1)], self.umo))
-        self.assertIn("https://i.pximg.net/7.png", result.chain[0].text)
-        self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
+        self.assertEqual(len(result.chain), 2)
+        self.assertIsInstance(result.chain[0], Plain)
+        self.assertEqual(result.chain[0].text, "------- NSFW -------")
+        self.assertIsInstance(result.chain[1], Nodes)
+        self.assertEqual(len(result.chain[1].nodes), 1)
+        content = result.chain[1].nodes[0].content
+        self.assertTrue(all(isinstance(part, Plain) for part in content))
+        self.assertIn("https://i.pximg.net/7.png", content[0].text)
+        self.assertEqual(content[-1].text, "\n图片文字翻译暂不可用")
         self.host._translate_image_content.assert_not_awaited()
 
     async def test_link_download_await_rechecks_policy_before_model(self):

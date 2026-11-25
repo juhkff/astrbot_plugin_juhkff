@@ -301,7 +301,7 @@ class PixivBrowseMixin:
         ranking = self.cfg.get("ranking") or {}
         settings = (self.cfg.get("random") or {}) if randomized else ranking
         count = _bounded(
-            settings.get("count"), 1 if randomized else 5, 10 if randomized else 20
+            settings.get("count"), 1 if randomized else 3, 10 if randomized else 20
         )
         pages = _bounded(
             settings.get("search_pages") if keyword else ranking.get("pool_pages"),
@@ -579,12 +579,13 @@ class PixivBrowseMixin:
         """Render works, nesting albums only when multiple works are displayed.
 
         Args:
-            items: Validated host details in display order.
+            items: Validated host details; order is preserved within each rating group.
             umo: Fully qualified destination group.
             ranks: Artwork IDs mapped to their original ranking positions.
             delivery_active: Optional subscription identity and membership guard.
             bot_id: Known sender account, avoiding an extra OneBot API request.
             ranking_sections: Keep ranking sections in one forward with an NSFW divider.
+                Mixed general and restricted works enable this for every entry point.
             failed_work_ids: Optional collector for failed works to skip in this batch.
                 Without a collector, required page failures abort the entire render.
 
@@ -632,8 +633,7 @@ class PixivBrowseMixin:
         content_provider = str(content_translation.get("provider_id") or "").strip()
         filter_r18, display = self._content_policy(umo)
         restricted_work_ids = set()
-        if ranking_sections:
-            items = sorted(items, key=lambda work: work.get("x_restrict", -1) != 0)
+        items = sorted(items, key=lambda work: work.get("x_restrict", -1) != 0)
         works = [
             item
             for item in items
@@ -894,7 +894,15 @@ class PixivBrowseMixin:
             len(work_captions),
             len(entries),
         )
-        if len(entries) < 2 and not (ranking_sections and restricted_work_ids):
+        displayed_ids = set(entry_work_ids)
+        ranking_sections = ranking_sections or (
+            bool(displayed_ids & restricted_work_ids)
+            and bool(displayed_ids - restricted_work_ids)
+        )
+        single_restricted = (
+            len(entries) == 1 and entry_work_ids[0] in restricted_work_ids
+        )
+        if len(entries) < 2 and not single_restricted:
             return MessageChain([component for entry in entries for component in entry])
         if bot_id is None:
             bot_id = await self._get_bot_id(umo)
@@ -908,7 +916,12 @@ class PixivBrowseMixin:
         work_node: Node | None = None
         nsfw_started = False
         for entry, size, work_id in zip(entries, entry_sizes, entry_work_ids):
-            if ranking_sections and work_id in restricted_work_ids and not nsfw_started:
+            if (
+                ranking_sections
+                and not single_restricted
+                and work_id in restricted_work_ids
+                and not nsfw_started
+            ):
                 nodes.append(
                     Node(name="Pixiv", uin=bot_id, content=[Plain(_NSFW_SEPARATOR)])
                 )
@@ -966,6 +979,8 @@ class PixivBrowseMixin:
                         batch.nodes = [
                             part for part in content if isinstance(part, Node)
                         ]
+        if single_restricted:
+            batches.insert(0, Plain("------- NSFW -------"))
         return MessageChain(batches)
 
     async def start_browse(self) -> None:

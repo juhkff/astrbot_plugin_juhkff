@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 from PIL import Image as PILImage
 
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image, Nodes, Plain
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
@@ -337,13 +337,18 @@ class PixivAIToolTests(IsolatedAsyncioTestCase):
         self.assert_local_only()
 
     async def test_real_browse_renders_image_and_plain_link_success(self):
-        for display in ("image", "link"):
-            with self.subTest(display=display):
+        for restriction, display in (
+            (0, "image"),
+            (1, "image"),
+            (1, "link"),
+            (2, "image"),
+            (2, "link"),
+        ):
+            with self.subTest(restriction=restriction, display=display):
                 self.host._content_policy.return_value = (False, display)
                 self.host._fetch_detail.side_effect = None
-                self.host._fetch_detail.return_value = item(
-                    restriction=1 if display == "link" else 0
-                )
+                self.host._fetch_detail.return_value = item(restriction=restriction)
+                self.host._download.reset_mock()
                 event = self.event()
                 before = self.snapshot(event)
                 result = await self.plugin.juhkff_pixiv_artwork(event, "7", 1)
@@ -353,11 +358,25 @@ class PixivAIToolTests(IsolatedAsyncioTestCase):
                 self.assertTrue(chain.chain)
                 self.assertEqual(before, self.snapshot(event))
                 self.assertEqual(result, "Pixiv 浏览结果已发送到当前群聊。")
+                if restriction:
+                    self.assertEqual(len(chain.chain), 2)
+                    self.assertIsInstance(chain.chain[0], Plain)
+                    self.assertEqual(chain.chain[0].text, "------- NSFW -------")
+                    self.assertIsInstance(chain.chain[1], Nodes)
+                    self.assertEqual(len(chain.chain[1].nodes), 1)
+                    content = chain.chain[1].nodes[0].content
+                else:
+                    content = chain.chain
                 if display == "link":
-                    self.assertTrue(
-                        all(isinstance(part, Plain) for part in chain.chain)
+                    self.assertTrue(all(isinstance(part, Plain) for part in content))
+                    self.assertIn(
+                        "https://i.pximg.net/7.png",
+                        "\n".join(part.text for part in content),
                     )
-                    self.assertIn("https://i.pximg.net/7.png", chain.get_plain_text())
+                    self.host._download.assert_not_awaited()
+                else:
+                    self.assertTrue(any(isinstance(part, Image) for part in content))
+                    self.host._download.assert_awaited_once()
         self.assert_local_only()
 
     async def test_startup_await_rechecks_admission_before_browsing(self):
