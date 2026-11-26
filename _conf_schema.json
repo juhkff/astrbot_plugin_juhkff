@@ -974,7 +974,7 @@
           "method": {
             "description": "翻译方式",
             "type": "string",
-            "default": "",
+            "default": "off",
             "options": [
               "off",
               "text",
@@ -1064,7 +1064,7 @@
       "r18_policy": {
         "description": "R18 内容策略",
         "type": "string",
-        "default": "",
+        "default": "block",
         "options": [
           "block",
           "link",
@@ -1305,7 +1305,7 @@
           "pool_pages": {
             "description": "无关键词随机池页数",
             "type": "int",
-            "default": 0,
+            "default": 5,
             "slider": {
               "min": 1,
               "max": 10,
@@ -1386,7 +1386,7 @@
           "check_minutes": {
             "description": "检查间隔（分钟）",
             "type": "int",
-            "default": 0,
+            "default": 60,
             "hint": "画师新作检查间隔。",
             "slider": {
               "min": 1,
@@ -1397,7 +1397,7 @@
           "retry_interval_minutes": {
             "description": "重试基础间隔（分钟）",
             "type": "int",
-            "default": 0,
+            "default": 2,
             "hint": "订阅失败后按此间隔的 1、2、3…倍重试，成功后恢复正常。",
             "slider": {
               "min": 1,
@@ -1511,6 +1511,12 @@
           "max": 30,
           "step": 0.5
         }
+      },
+      "preferences_migrated": {
+        "description": "偏好配置已迁移",
+        "type": "bool",
+        "default": false,
+        "invisible": true
       }
     }
   },

@@ -45,9 +45,9 @@ class PixivConfigTests(TestCase):
                     }
                 )
                 settings = config["pixiv_push"]
-                self.assertEqual(settings["r18_policy"], "")
-                self.assertEqual(settings["content_translation"]["method"], "")
-                self.assertEqual(settings["random"]["pool_pages"], 0)
+                self.assertEqual(settings["r18_policy"], "block")
+                self.assertEqual(settings["content_translation"]["method"], "off")
+                self.assertEqual(settings["random"]["pool_pages"], 5)
                 with patch.object(
                     AstrBotConfig,
                     "save_config",
@@ -94,6 +94,7 @@ class PixivConfigTests(TestCase):
     def test_new_choices_win_and_unrelated_settings_are_preserved(self):
         config = self.load(
             {
+                "preferences_migrated": True,
                 "r18_policy": "image",
                 "filter_r18": True,
                 "content_translation": {
@@ -135,8 +136,8 @@ class PixivConfigTests(TestCase):
         settings = config["pixiv_push"]
         self.assertEqual(settings["subscriptions"], subscriptions)
         self.assertEqual(settings["artist_subscription"]["list"], [])
-        self.assertEqual(settings["artist_subscription"]["check_minutes"], 0)
-        self.assertEqual(settings["artist_subscription"]["retry_interval_minutes"], 0)
+        self.assertEqual(settings["artist_subscription"]["check_minutes"], 60)
+        self.assertEqual(settings["artist_subscription"]["retry_interval_minutes"], 2)
         self.assertFalse(settings["artist_subscription"]["migrated"])
         with patch.object(
             AstrBotConfig,
@@ -207,8 +208,81 @@ class PixivConfigTests(TestCase):
         self.assertFalse(migrate_pixiv_config(reloaded))
         self.assertEqual(reloaded["pixiv_push"]["artist_subscription"], expected)
 
+    def test_migrated_intervals_preserve_defaults_and_repair_zero_placeholders(self):
+        for check, retry, expected in ((60, 2, (60, 2)), (0, 0, (137, 11))):
+            with self.subTest(check=check, retry=retry):
+                config = self.load(
+                    {
+                        "check_minutes": 137,
+                        "retry_interval_minutes": 11,
+                        "artist_subscription": {
+                            "migrated": True,
+                            "check_minutes": check,
+                            "retry_interval_minutes": retry,
+                        },
+                    }
+                )
+                PixivPushModule(SimpleNamespace(config=config))
+                subscription = config["pixiv_push"]["artist_subscription"]
+                self.assertEqual(
+                    (
+                        subscription["check_minutes"],
+                        subscription["retry_interval_minutes"],
+                    ),
+                    expected,
+                )
+                reloaded = AstrBotConfig(config_path=str(self.path), schema=self.schema)
+                self.assertFalse(migrate_pixiv_config(reloaded))
+                self.assertEqual(
+                    reloaded["pixiv_push"]["artist_subscription"], subscription
+                )
+
+    def test_migrated_preferences_keep_explicit_default_choices(self):
+        for marker in (
+            {"preferences_migrated": True},
+            {"artist_subscription": {"migrated": True}},
+        ):
+            with self.subTest(marker=marker):
+                config = self.load(
+                    {
+                        **marker,
+                        "filter_r18": False,
+                        "r18_display": "image",
+                        "r18_policy": "block",
+                        "content_translation": {
+                            "method": "off",
+                            "enable": True,
+                            "mode": "overlay",
+                        },
+                        "ranking": {"pool_pages": 8},
+                        "random": {"pool_pages": 5},
+                    }
+                )
+                PixivPushModule(SimpleNamespace(config=config))
+                settings = config["pixiv_push"]
+                self.assertEqual(settings["r18_policy"], "block")
+                self.assertEqual(settings["content_translation"]["method"], "off")
+                self.assertEqual(settings["random"]["pool_pages"], 5)
+                self.assertFalse(migrate_pixiv_config(config))
+
+    def test_zero_random_pool_recovers_legacy_and_later_reset_survives_reload(self):
+        config = self.load({"random": {"pool_pages": 0}, "ranking": {"pool_pages": 8}})
+        PixivPushModule(SimpleNamespace(config=config))
+        self.assertEqual(config["pixiv_push"]["random"]["pool_pages"], 8)
+        config["pixiv_push"]["random"]["pool_pages"] = 5
+        config.save_config()
+        reloaded = AstrBotConfig(config_path=str(self.path), schema=self.schema)
+        self.assertFalse(migrate_pixiv_config(reloaded))
+        self.assertEqual(reloaded["pixiv_push"]["random"]["pool_pages"], 5)
+
     def test_artist_subscription_defaults_are_resolved_on_first_migration(self):
         config = self.load({})
+        self.assertEqual(config["pixiv_push"]["random"]["pool_pages"], 5)
+        self.assertEqual(config["pixiv_push"]["r18_policy"], "block")
+        self.assertEqual(config["pixiv_push"]["content_translation"]["method"], "off")
+        subscription = config["pixiv_push"]["artist_subscription"]
+        self.assertEqual(subscription["check_minutes"], 60)
+        self.assertEqual(subscription["retry_interval_minutes"], 2)
         PixivPushModule(SimpleNamespace(config=config))
         self.assertEqual(
             config["pixiv_push"]["artist_subscription"],
