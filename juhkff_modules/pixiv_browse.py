@@ -477,31 +477,31 @@ class PixivBrowseMixin:
         return result["translation"]
 
     async def _typeset_image_content(
-        self, image: Path, language: str, base_url: str, translator: str
+        self, image: Path, language: str, app_id: str, app_key: str
     ) -> tuple[Path | None, str]:
-        """Translate and typeset a page using manga-image-translator.
+        """Translate and typeset a page using Baidu image translation.
 
         Args:
             image: Downloaded source image, never overwritten.
-            language: Target language name or manga-image-translator code.
-            base_url: Operator-configured external service root URL.
-            translator: Translation engine selected in the external service.
+            language: Target language name or Baidu language code.
+            app_id: Baidu Translate Open Platform application ID.
+            app_key: Baidu Translate Open Platform application secret.
 
         Returns:
             Cached translated image and empty plain text.
         """
-        from .pixiv_manga import translate_image
+        from .pixiv_baidu import translate_image
 
         _ensure_processing_current()
-        if not base_url:
+        if not app_id or not app_key:
             raise ValueError(
-                "Configure content_translation.typesetting.base_url for manga-image-translator"
+                "Configure content_translation.typesetting.app_id and app_key for Baidu"
             )
         if getattr(self, "_pixiv_typesetting_slots", None) is None:
             self._pixiv_typesetting_slots = asyncio.Semaphore(1)
         async with self._pixiv_typesetting_slots:
             _ensure_processing_current()
-            rendered = await translate_image(image, language, base_url, translator)
+            rendered = await translate_image(image, language, app_id, app_key)
             _ensure_processing_current()
             return rendered, ""
 
@@ -710,15 +710,15 @@ class PixivBrowseMixin:
                                 content_language,
                                 str(
                                     (content_translation.get("typesetting") or {}).get(
-                                        "base_url"
+                                        "app_id"
                                     )
                                     or ""
                                 ).strip(),
                                 str(
                                     (content_translation.get("typesetting") or {}).get(
-                                        "translator"
+                                        "app_key"
                                     )
-                                    or "offline"
+                                    or ""
                                 ).strip(),
                             ),
                             timeout=content_timeout,

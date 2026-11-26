@@ -11,8 +11,8 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
+from juhkff_modules import pixiv_baidu as baidu
 from juhkff_modules import pixiv_browse as browse
-from juhkff_modules import pixiv_manga as manga
 from PIL import Image as PILImage
 from pixiv_test_utils import page_nodes
 from test_pixiv_browse import BrowseHost, awaited, item, must
@@ -42,8 +42,8 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
             "provider_id": "vision-model",
             "language": "English",
             "typesetting": {
-                "base_url": " http://localhost:8000 ",
-                "translator": " offline ",
+                "app_id": " test-app ",
+                "app_key": " test-key ",
             },
         }
         self.umo = "test:GroupMessage:1"
@@ -75,17 +75,17 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
     async def test_typesetting_delegates_without_model_or_original_mutation(self):
         original_bytes = self.images[0].read_bytes()
         with patch.object(
-            manga,
+            baidu,
             "translate_image",
             new_callable=AsyncMock,
             return_value=self.overlays[0],
         ) as translate:
             result = await self.host._typeset_image_content(
-                self.images[0], "English", "http://localhost:8000", "offline"
+                self.images[0], "English", "test-app", "test-key"
             )
         self.assertEqual(result, (self.overlays[0], ""))
         translate.assert_awaited_once_with(
-            self.images[0], "English", "http://localhost:8000", "offline"
+            self.images[0], "English", "test-app", "test-key"
         )
         self.context.llm_generate.assert_not_awaited()
         self.context.get_current_chat_provider_id.assert_not_awaited()
@@ -95,14 +95,14 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
         for error in (RuntimeError("Unavailable"), ValueError("Invalid image")):
             with self.subTest(error=error):
                 with patch.object(
-                    manga, "translate_image", new_callable=AsyncMock, side_effect=error
+                    baidu, "translate_image", new_callable=AsyncMock, side_effect=error
                 ) as translate:
                     with self.assertRaisesRegex(type(error), str(error)):
                         await self.host._typeset_image_content(
                             self.images[0],
                             "English",
-                            "http://localhost:8000",
-                            "offline",
+                            "test-app",
+                            "test-key",
                         )
                 translate.assert_awaited_once()
                 self.context.llm_generate.assert_not_awaited()
@@ -126,17 +126,17 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
             finally:
                 active -= 1
 
-        with patch.object(manga, "translate_image", side_effect=translate):
+        with patch.object(baidu, "translate_image", side_effect=translate):
             first = asyncio.create_task(
                 self.host._typeset_image_content(
-                    self.images[0], "English", "http://localhost:8000", "offline"
+                    self.images[0], "English", "test-app", "test-key"
                 )
             )
             self.addAsyncCleanup(self._cancel_tasks, first)
             await entered.wait()
             second = asyncio.create_task(
                 self.host._typeset_image_content(
-                    self.images[1], "日本語", "http://other:8000", "google"
+                    self.images[1], "日本語", "other-app", "other-key"
                 )
             )
             self.addAsyncCleanup(self._cancel_tasks, second)
@@ -164,17 +164,17 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
             await release.wait()
             return self.overlays[0]
 
-        with patch.object(manga, "translate_image", side_effect=translate) as service:
+        with patch.object(baidu, "translate_image", side_effect=translate) as service:
             first = asyncio.create_task(
                 self.host._typeset_image_content(
-                    self.images[0], "English", "http://localhost:8000", "offline"
+                    self.images[0], "English", "test-app", "test-key"
                 )
             )
             self.addAsyncCleanup(self._cancel_tasks, first)
             await entered.wait()
             queued = asyncio.create_task(
                 self.host._typeset_image_content(
-                    self.images[1], "English", "http://localhost:8000", "offline"
+                    self.images[1], "English", "test-app", "test-key"
                 )
             )
             self.addAsyncCleanup(self._cancel_tasks, queued)
@@ -185,7 +185,7 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
             release.set()
             await first
             await self.host._typeset_image_content(
-                self.images[2], "English", "http://localhost:8000", "offline"
+                self.images[2], "English", "test-app", "test-key"
             )
         self.assertEqual(
             [call.args[0] for call in service.await_args_list],
@@ -194,11 +194,11 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
 
     async def test_timeout_while_queued_does_not_call_service(self):
         self.host._pixiv_typesetting_slots = asyncio.Semaphore(0)
-        with patch.object(manga, "translate_image", new_callable=AsyncMock) as service:
+        with patch.object(baidu, "translate_image", new_callable=AsyncMock) as service:
             with self.assertRaises(asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self.host._typeset_image_content(
-                        self.images[0], "English", "http://localhost:8000", "offline"
+                        self.images[0], "English", "test-app", "test-key"
                     ),
                     timeout=0.01,
                 )
@@ -224,14 +224,14 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                 token = browse._PROCESSING_GUARD.set(guard)
                 try:
                     with patch.object(
-                        manga, "translate_image", side_effect=translate
+                        baidu, "translate_image", side_effect=translate
                     ) as service:
                         task = asyncio.create_task(
                             self.host._typeset_image_content(
                                 self.images[0],
                                 "English",
-                                "http://localhost:8000",
-                                "offline",
+                                "test-app",
+                                "test-key",
                             )
                         )
                         self.addAsyncCleanup(self._cancel_tasks, task)
@@ -270,30 +270,29 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                 self.host._typeset_image_content.assert_awaited_once_with(
                     self.images[0],
                     "English",
-                    "http://localhost:8000",
-                    "offline",
+                    "test-app",
+                    "test-key",
                 )
 
-    async def test_overlay_uses_offline_translator_when_not_configured(self):
-        self.host.cfg["content_translation"]["typesetting"].pop("translator")
-        with patch.object(
-            manga, "translate_image", return_value=self.overlays[0]
-        ) as service:
-            result = must(await self.host._render_items([item()], self.umo))
-        service.assert_awaited_once_with(
-            self.images[0], "English", "http://localhost:8000", "offline"
-        )
-        self.assertEqual(result.chain[1].file, self.overlays[0].as_uri())
-        self.context.llm_generate.assert_not_awaited()
-
-    async def test_missing_service_url_preserves_original_without_model_fallback(self):
-        self.host.cfg["content_translation"].pop("typesetting")
-        with patch.object(manga, "translate_image", new_callable=AsyncMock) as service:
-            result = must(await self.host._render_items([item()], self.umo))
-        service.assert_not_awaited()
-        self.assertEqual(result.chain[1].file, self.images[0].as_uri())
-        self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
-        self.context.llm_generate.assert_not_awaited()
+    async def test_missing_credentials_preserve_original_without_model_fallback(self):
+        for missing in ("app_id", "app_key", "typesetting"):
+            with self.subTest(missing=missing):
+                self.host.cfg["content_translation"]["typesetting"] = {
+                    "app_id": "test-app",
+                    "app_key": "test-key",
+                }
+                if missing == "typesetting":
+                    self.host.cfg["content_translation"].pop("typesetting")
+                else:
+                    self.host.cfg["content_translation"]["typesetting"].pop(missing)
+                with patch.object(
+                    baidu, "translate_image", new_callable=AsyncMock
+                ) as service:
+                    result = must(await self.host._render_items([item()], self.umo))
+                service.assert_not_awaited()
+                self.assertEqual(result.chain[1].file, self.images[0].as_uri())
+                self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
+                self.context.llm_generate.assert_not_awaited()
 
     async def test_multiple_works_preserve_overlay_page_order(self):
         self.host._download.side_effect = self.images
@@ -336,7 +335,7 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
         for error in (RuntimeError("Unavailable"), ValueError("Invalid image")):
             with self.subTest(error=error):
                 with patch.object(
-                    manga, "translate_image", side_effect=error
+                    baidu, "translate_image", side_effect=error
                 ) as service:
                     result = must(await self.host._render_items([item()], self.umo))
                 service.assert_awaited_once()
@@ -359,24 +358,24 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
             self.assertEqual(timeout, 120)
             return await original_wait_for(awaitable, timeout=0.01)
 
-        with patch.object(manga, "translate_image", side_effect=slow):
+        with patch.object(baidu, "translate_image", side_effect=slow):
             with patch.object(browse.asyncio, "wait_for", side_effect=short_timeout):
                 result = must(await self.host._render_items([item()], self.umo))
         self.assertTrue(cancelled.is_set())
         self.assertEqual(result.chain[1].file, self.images[0].as_uri())
         self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
         self.context.llm_generate.assert_not_awaited()
-        with patch.object(manga, "translate_image", return_value=self.overlays[0]):
+        with patch.object(baidu, "translate_image", return_value=self.overlays[0]):
             result = await original_wait_for(
                 self.host._typeset_image_content(
-                    self.images[0], "English", "http://localhost:8000", "offline"
+                    self.images[0], "English", "test-app", "test-key"
                 ),
                 timeout=1,
             )
         self.assertEqual(result, (self.overlays[0], ""))
 
     async def test_cancellation_propagates_from_service(self):
-        with patch.object(manga, "translate_image", side_effect=asyncio.CancelledError):
+        with patch.object(baidu, "translate_image", side_effect=asyncio.CancelledError):
             with self.assertRaises(asyncio.CancelledError):
                 await self.host._render_items([item()], self.umo)
         self.context.send_message.assert_not_awaited()
