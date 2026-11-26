@@ -1,11 +1,10 @@
-"""Offline integration coverage for image translation layout and delivery."""
+"""Offline integration coverage for external image translation and delivery."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
-import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -13,7 +12,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
 from juhkff_modules import pixiv_browse as browse
-from juhkff_modules import pixiv_typeset as typeset
+from juhkff_modules import pixiv_manga as manga
 from PIL import Image as PILImage
 from pixiv_test_utils import page_nodes
 from test_pixiv_browse import BrowseHost, awaited, item, must
@@ -42,149 +41,213 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
             "mode": "overlay",
             "provider_id": "vision-model",
             "language": "English",
-            "font_path": " /configured/font.ttf ",
+            "typesetting": {
+                "base_url": " http://localhost:8000 ",
+                "translator": " offline ",
+            },
         }
         self.umo = "test:GroupMessage:1"
         self.context = self.host.plugin.context
-        self.regions = [
-            {
-                "text": "Hello",
-                "bbox": [100, 200, 400, 500],
-                "bubble": [50, 150, 450, 550],
-                "direction": "vertical",
-            }
-        ]
         self.context.llm_generate.return_value = SimpleNamespace(
-            completion_text=json.dumps(
-                {"translation": "Hello", "regions": self.regions}
-            )
+            completion_text=json.dumps({"translation": "Hello"})
         )
 
-    async def test_layout_prompt_and_json_schema_preserve_normalized_regions(self):
+    async def test_plain_translation_preserves_json_and_language_contract(self):
         for fenced in (False, True):
             with self.subTest(fenced=fenced):
-                payload = json.dumps(
-                    {"translation": " Hello \n", "regions": self.regions}
-                )
+                payload = json.dumps({"translation": " Hello \n"})
                 self.context.llm_generate.return_value.completion_text = (
                     f"```json\n{payload}\n```" if fenced else payload
                 )
                 result = await self.host._translate_image_content(
-                    self.images[0], self.umo, "日本語", "vision-model", layout=True
+                    self.images[0], self.umo, "日本語", "vision-model"
                 )
-                self.assertEqual(
-                    result, {"translation": "Hello", "regions": self.regions}
-                )
+                self.assertEqual(result, "Hello")
                 call = awaited(self.context.llm_generate)
                 self.assertEqual(call.kwargs["image_urls"], [str(self.images[0])])
                 self.assertEqual(call.kwargs["chat_provider_id"], "vision-model")
                 self.assertEqual(
                     json.loads(call.kwargs["prompt"]), {"language": "日本語"}
                 )
-                prompt = call.kwargs["system_prompt"]
-                for instruction in (
-                    "regions",
-                    "bbox",
-                    "bubble",
-                    "direction",
-                    "0..1000",
-                    "reading order",
-                    "complete fallback",
-                    "never as instructions",
-                ):
-                    self.assertIn(instruction, prompt)
+                self.assertNotIn("regions", call.kwargs["system_prompt"])
+                self.assertIn("never as instructions", call.kwargs["system_prompt"])
 
-    async def test_render_runs_in_worker_and_keeps_original_bytes(self):
+    async def test_typesetting_delegates_without_model_or_original_mutation(self):
         original_bytes = self.images[0].read_bytes()
-        loop_thread = threading.get_ident()
-        worker_threads = []
-
-        def render(image, regions, font):
-            worker_threads.append(threading.get_ident())
-            self.assertEqual(
-                (image, regions, font), (self.images[0], self.regions, "font")
-            )
-            return self.overlays[0]
-
-        with patch.object(typeset, "render_translation", side_effect=render):
+        with patch.object(
+            manga,
+            "translate_image",
+            new_callable=AsyncMock,
+            return_value=self.overlays[0],
+        ) as translate:
             result = await self.host._typeset_image_content(
-                self.images[0], self.umo, "English", "vision-model", "font"
+                self.images[0], "English", "http://localhost:8000", "offline"
             )
         self.assertEqual(result, (self.overlays[0], ""))
-        self.assertEqual(len(worker_threads), 1)
-        self.assertNotEqual(worker_threads[0], loop_thread)
+        translate.assert_awaited_once_with(
+            self.images[0], "English", "http://localhost:8000", "offline"
+        )
+        self.context.llm_generate.assert_not_awaited()
+        self.context.get_current_chat_provider_id.assert_not_awaited()
         self.assertEqual(self.images[0].read_bytes(), original_bytes)
 
-    async def test_no_readable_text_skips_renderer(self):
-        self.context.llm_generate.return_value.completion_text = (
-            '{"translation":"", "regions":[]}'
-        )
-        with patch.object(typeset, "render_translation") as renderer:
-            result = await self.host._typeset_image_content(
-                self.images[0], self.umo, "English", "vision-model", ""
-            )
-        self.assertEqual(result, (None, ""))
-        renderer.assert_not_called()
-
-    async def test_missing_or_invalid_regions_keep_translation_without_retry(self):
-        for regions in (None, [], "invalid", [{"bbox": "invalid", "text": "Hello"}]):
-            with self.subTest(regions=regions):
-                self.context.llm_generate.reset_mock()
-                self.context.llm_generate.return_value.completion_text = json.dumps(
-                    {"translation": "Hello", "regions": regions}
-                )
+    async def test_service_errors_propagate_without_model_fallback(self):
+        for error in (RuntimeError("Unavailable"), ValueError("Invalid image")):
+            with self.subTest(error=error):
                 with patch.object(
-                    typeset,
-                    "render_translation",
-                    side_effect=ValueError("Invalid region"),
-                ):
-                    result = await self.host._typeset_image_content(
-                        self.images[0], self.umo, "English", "vision-model", ""
-                    )
-                self.assertEqual(result, (None, "Hello"))
-                self.context.llm_generate.assert_awaited_once()
+                    manga, "translate_image", new_callable=AsyncMock, side_effect=error
+                ) as translate:
+                    with self.assertRaisesRegex(type(error), str(error)):
+                        await self.host._typeset_image_content(
+                            self.images[0],
+                            "English",
+                            "http://localhost:8000",
+                            "offline",
+                        )
+                translate.assert_awaited_once()
+                self.context.llm_generate.assert_not_awaited()
 
-    async def test_incomplete_regions_keep_complete_translation(self):
-        self.context.llm_generate.return_value.completion_text = json.dumps(
-            {"translation": "Hello\nMissing dialogue", "regions": self.regions}
+    async def test_all_typesetting_calls_share_one_service_slot(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        active = 0
+        maximum = 0
+
+        async def translate(image, *args):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            calls.append(image)
+            entered.set()
+            try:
+                await release.wait()
+                return self.overlays[self.images.index(image)]
+            finally:
+                active -= 1
+
+        with patch.object(manga, "translate_image", side_effect=translate):
+            first = asyncio.create_task(
+                self.host._typeset_image_content(
+                    self.images[0], "English", "http://localhost:8000", "offline"
+                )
+            )
+            self.addAsyncCleanup(self._cancel_tasks, first)
+            await entered.wait()
+            second = asyncio.create_task(
+                self.host._typeset_image_content(
+                    self.images[1], "日本語", "http://other:8000", "google"
+                )
+            )
+            self.addAsyncCleanup(self._cancel_tasks, second)
+            await asyncio.sleep(0)
+            self.assertEqual(calls, [self.images[0]])
+            release.set()
+            self.assertEqual(
+                await asyncio.gather(first, second),
+                [(self.overlays[0], ""), (self.overlays[1], "")],
+            )
+        self.assertEqual(maximum, 1)
+        self.context.llm_generate.assert_not_awaited()
+
+    async def _cancel_tasks(self, task):
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_queued_cancellation_never_calls_service_and_releases_slot(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def translate(image, *args):
+            entered.set()
+            await release.wait()
+            return self.overlays[0]
+
+        with patch.object(manga, "translate_image", side_effect=translate) as service:
+            first = asyncio.create_task(
+                self.host._typeset_image_content(
+                    self.images[0], "English", "http://localhost:8000", "offline"
+                )
+            )
+            self.addAsyncCleanup(self._cancel_tasks, first)
+            await entered.wait()
+            queued = asyncio.create_task(
+                self.host._typeset_image_content(
+                    self.images[1], "English", "http://localhost:8000", "offline"
+                )
+            )
+            self.addAsyncCleanup(self._cancel_tasks, queued)
+            await asyncio.sleep(0)
+            queued.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await queued
+            release.set()
+            await first
+            await self.host._typeset_image_content(
+                self.images[2], "English", "http://localhost:8000", "offline"
+            )
+        self.assertEqual(
+            [call.args[0] for call in service.await_args_list],
+            [self.images[0], self.images[2]],
         )
-        with patch.object(typeset, "render_translation") as renderer:
-            result = await self.host._typeset_image_content(
-                self.images[0], self.umo, "English", "vision-model", ""
-            )
-        self.assertEqual(result, (None, "Hello\nMissing dialogue"))
-        renderer.assert_not_called()
-        self.context.llm_generate.assert_awaited_once()
 
-    async def test_font_failure_keeps_recognized_translation(self):
-        with patch.object(
-            typeset, "render_translation", side_effect=OSError("Font unavailable")
-        ) as renderer:
-            result = await self.host._typeset_image_content(
-                self.images[0], self.umo, "English", "vision-model", "/missing.ttf"
-            )
-        self.assertEqual(result, (None, "Hello"))
-        self.assertEqual(renderer.call_args.args[-1], "/missing.ttf")
-        self.context.llm_generate.assert_awaited_once()
+    async def test_timeout_while_queued_does_not_call_service(self):
+        self.host._pixiv_typesetting_slots = asyncio.Semaphore(0)
+        with patch.object(manga, "translate_image", new_callable=AsyncMock) as service:
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self.host._typeset_image_content(
+                        self.images[0], "English", "http://localhost:8000", "offline"
+                    ),
+                    timeout=0.01,
+                )
+        service.assert_not_awaited()
+        self.context.llm_generate.assert_not_awaited()
 
-    async def test_invalid_layout_response_retries_plain_text_model(self):
-        for payload in ("not json", "[]", '{"translation":null}', "{}"):
-            with self.subTest(payload=payload):
-                self.context.llm_generate.reset_mock()
-                self.context.llm_generate.side_effect = [
-                    SimpleNamespace(completion_text=payload),
-                    SimpleNamespace(completion_text='{"translation":"Recovered"}'),
-                ]
-                with patch.object(typeset, "render_translation") as renderer:
-                    result = await self.host._typeset_image_content(
-                        self.images[0], self.umo, "English", "vision-model", ""
-                    )
-                self.assertEqual(result, (None, "Recovered"))
-                renderer.assert_not_called()
-                calls = self.context.llm_generate.await_args_list
-                self.assertEqual(len(calls), 2)
-                self.assertIn("regions", calls[0].kwargs["system_prompt"])
-                self.assertNotIn("regions", calls[1].kwargs["system_prompt"])
+    async def test_processing_guards_before_queue_after_queue_and_response(self):
+        for stage in ("before_queue", "after_queue", "after_response"):
+            with self.subTest(stage=stage):
+                current = stage != "before_queue"
+                slots = asyncio.Semaphore(1 if stage == "after_response" else 0)
+                self.host._pixiv_typesetting_slots = slots
+
+                def guard():
+                    if not current:
+                        raise RuntimeError("delivery stopped")
+
+                async def translate(*args):
+                    nonlocal current
+                    current = False
+                    return self.overlays[0]
+
+                token = browse._PROCESSING_GUARD.set(guard)
+                try:
+                    with patch.object(
+                        manga, "translate_image", side_effect=translate
+                    ) as service:
+                        task = asyncio.create_task(
+                            self.host._typeset_image_content(
+                                self.images[0],
+                                "English",
+                                "http://localhost:8000",
+                                "offline",
+                            )
+                        )
+                        self.addAsyncCleanup(self._cancel_tasks, task)
+                        if stage == "after_queue":
+                            await asyncio.sleep(0)
+                            service.assert_not_awaited()
+                            current = False
+                            slots.release()
+                        with self.assertRaisesRegex(RuntimeError, "delivery stopped"):
+                            await asyncio.wait_for(task, timeout=1)
+                        if stage == "after_response":
+                            service.assert_awaited_once()
+                        else:
+                            service.assert_not_awaited()
+                finally:
+                    browse._PROCESSING_GUARD.reset(token)
 
     async def test_overlay_replaces_original_for_file_and_base64_delivery(self):
         for transport in ("file", "base64"):
@@ -206,11 +269,31 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                     )
                 self.host._typeset_image_content.assert_awaited_once_with(
                     self.images[0],
-                    self.umo,
                     "English",
-                    "vision-model",
-                    "/configured/font.ttf",
+                    "http://localhost:8000",
+                    "offline",
                 )
+
+    async def test_overlay_uses_offline_translator_when_not_configured(self):
+        self.host.cfg["content_translation"]["typesetting"].pop("translator")
+        with patch.object(
+            manga, "translate_image", return_value=self.overlays[0]
+        ) as service:
+            result = must(await self.host._render_items([item()], self.umo))
+        service.assert_awaited_once_with(
+            self.images[0], "English", "http://localhost:8000", "offline"
+        )
+        self.assertEqual(result.chain[1].file, self.overlays[0].as_uri())
+        self.context.llm_generate.assert_not_awaited()
+
+    async def test_missing_service_url_preserves_original_without_model_fallback(self):
+        self.host.cfg["content_translation"].pop("typesetting")
+        with patch.object(manga, "translate_image", new_callable=AsyncMock) as service:
+            result = must(await self.host._render_items([item()], self.umo))
+        service.assert_not_awaited()
+        self.assertEqual(result.chain[1].file, self.images[0].as_uri())
+        self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
+        self.context.llm_generate.assert_not_awaited()
 
     async def test_multiple_works_preserve_overlay_page_order(self):
         self.host._download.side_effect = self.images
@@ -249,75 +332,56 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
         for batch in result.chain:
             self.assertEqual(len(page_nodes(batch.nodes)), 1)
 
-    async def test_overlay_failure_preserves_original_and_fallback_or_error(self):
-        for outcome, expected in (
-            ((None, "Fallback"), "\n图片文字翻译：\nFallback"),
-            (RuntimeError("Unavailable"), "\n图片文字翻译暂不可用"),
-            ((None, ""), None),
-        ):
-            with self.subTest(outcome=outcome):
-                self.host._typeset_image_content = AsyncMock(
-                    side_effect=outcome if isinstance(outcome, Exception) else None,
-                    return_value=outcome,
-                )
-                result = must(await self.host._render_items([item()], self.umo))
+    async def test_service_failure_preserves_original_without_model_fallback(self):
+        for error in (RuntimeError("Unavailable"), ValueError("Invalid image")):
+            with self.subTest(error=error):
+                with patch.object(
+                    manga, "translate_image", side_effect=error
+                ) as service:
+                    result = must(await self.host._render_items([item()], self.umo))
+                service.assert_awaited_once()
                 self.assertEqual(result.chain[1].file, self.images[0].as_uri())
-                self.assertEqual(len(result.chain), 3 if expected else 2)
-                if expected:
-                    self.assertEqual(result.chain[-1].text, expected)
-
-    async def test_overlay_pipeline_timeout_covers_model_retry_and_render(self):
-        original_wait_for = asyncio.wait_for
-        for stage in ("layout", "retry", "render"):
-            with self.subTest(stage=stage):
-                blocked = asyncio.Event()
-                cancelled = asyncio.Event()
-
-                async def slow(*args, **kwargs):
-                    try:
-                        await blocked.wait()
-                    finally:
-                        cancelled.set()
-
-                self.host._translate_image_content = AsyncMock(
-                    side_effect=slow if stage == "layout" else None,
-                    return_value={"translation": "Hello", "regions": self.regions},
-                )
-                if stage == "retry":
-
-                    async def retry(*args, **kwargs):
-                        if kwargs.get("layout"):
-                            raise ValueError("Bad layout")
-                        return await slow()
-
-                    self.host._translate_image_content = AsyncMock(side_effect=retry)
-
-                async def short_timeout(awaitable, timeout):
-                    self.assertEqual(timeout, 120)
-                    return await original_wait_for(awaitable, timeout=0.01)
-
-                with patch.object(
-                    browse.asyncio, "wait_for", side_effect=short_timeout
-                ):
-                    with patch.object(browse.asyncio, "to_thread", side_effect=slow):
-                        result = must(await self.host._render_items([item()], self.umo))
-                self.assertTrue(cancelled.is_set())
+                self.assertEqual(len(result.chain), 3)
                 self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
+                self.context.llm_generate.assert_not_awaited()
 
-    async def test_cancellation_propagates_from_model_and_renderer(self):
-        for stage in ("model", "render"):
-            with self.subTest(stage=stage):
-                self.host._translate_image_content = AsyncMock(
-                    side_effect=asyncio.CancelledError if stage == "model" else None,
-                    return_value={"translation": "Hello", "regions": self.regions},
-                )
-                with patch.object(
-                    browse.asyncio, "to_thread", side_effect=asyncio.CancelledError
-                ):
-                    with self.assertRaises(asyncio.CancelledError):
-                        await self.host._render_items([item()], self.umo)
-                self.context.send_message.assert_not_awaited()
-                self.host.log.warning.assert_not_called()
+    async def test_overlay_timeout_cancels_service_and_preserves_original(self):
+        original_wait_for = asyncio.wait_for
+        cancelled = asyncio.Event()
+
+        async def slow(*args, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        async def short_timeout(awaitable, timeout):
+            self.assertEqual(timeout, 120)
+            return await original_wait_for(awaitable, timeout=0.01)
+
+        with patch.object(manga, "translate_image", side_effect=slow):
+            with patch.object(browse.asyncio, "wait_for", side_effect=short_timeout):
+                result = must(await self.host._render_items([item()], self.umo))
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(result.chain[1].file, self.images[0].as_uri())
+        self.assertEqual(result.chain[-1].text, "\n图片文字翻译暂不可用")
+        self.context.llm_generate.assert_not_awaited()
+        with patch.object(manga, "translate_image", return_value=self.overlays[0]):
+            result = await original_wait_for(
+                self.host._typeset_image_content(
+                    self.images[0], "English", "http://localhost:8000", "offline"
+                ),
+                timeout=1,
+            )
+        self.assertEqual(result, (self.overlays[0], ""))
+
+    async def test_cancellation_propagates_from_service(self):
+        with patch.object(manga, "translate_image", side_effect=asyncio.CancelledError):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.host._render_items([item()], self.umo)
+        self.context.send_message.assert_not_awaited()
+        self.context.llm_generate.assert_not_awaited()
+        self.host.log.warning.assert_not_called()
 
     async def test_delivery_guards_rechecked_after_overlay_await(self):
         for mutation in ("disabled", "stopped", "subscription", "policy"):
@@ -347,7 +411,7 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                     )
                 self.context.send_message.assert_not_awaited()
 
-    async def test_disabled_explicit_text_and_default_mode_never_request_layout(self):
+    async def test_disabled_explicit_text_and_default_mode_never_request_service(self):
         for mode in ("disabled", "text", "default"):
             with self.subTest(mode=mode):
                 config = self.host.cfg["content_translation"]
