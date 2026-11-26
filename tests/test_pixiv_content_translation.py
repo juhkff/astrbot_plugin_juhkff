@@ -114,6 +114,21 @@ class PixivContentTranslationTests(IsolatedAsyncioTestCase):
             self.images[0], self.umo, "English", "vision-model"
         )
 
+    async def test_explicit_method_overrides_legacy_enable_and_mode(self):
+        for method, expected_calls in (("off", 0), ("text", 1)):
+            with self.subTest(method=method):
+                self.host.cfg["content_translation"].update(
+                    method=method, enable=method == "off", mode="overlay"
+                )
+                self.host._translate_image_content = AsyncMock(return_value="Hello")
+                self.host._typeset_image_content = AsyncMock()
+                result = must(await self.host._render_items([item()], self.umo))
+                self.assertEqual(len(result.chain), 2 + expected_calls)
+                self.assertEqual(
+                    self.host._translate_image_content.await_count, expected_calls
+                )
+                self.host._typeset_image_content.assert_not_awaited()
+
     async def test_each_page_keeps_its_translation_in_nested_multi_work_forward(self):
         self.host._download.side_effect = self.images
         self.host._translate_image_content = AsyncMock(

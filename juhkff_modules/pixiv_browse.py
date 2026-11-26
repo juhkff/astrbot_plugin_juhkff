@@ -304,7 +304,9 @@ class PixivBrowseMixin:
             settings.get("count"), 1 if randomized else 3, 10 if randomized else 20
         )
         pages = _bounded(
-            settings.get("search_pages") if keyword else ranking.get("pool_pages"),
+            settings.get("search_pages")
+            if keyword
+            else (settings.get("pool_pages") or ranking.get("pool_pages")),
             3 if keyword else 5,
             10,
         )
@@ -554,7 +556,17 @@ class PixivBrowseMixin:
         translate = translation.get("enable", False)
         language = str(translation.get("language") or "").strip() or "中文"
         content_translation = self.cfg.get("content_translation") or {}
-        translate_content = content_translation.get("enable", False)
+        content_method = content_translation.get("method")
+        if content_method not in ("off", "text", "overlay"):
+            content_method = (
+                ("overlay" if content_translation.get("mode") == "overlay" else "text")
+                if content_translation.get("enable", False)
+                else "off"
+            )
+        translate_content = content_method != "off"
+        typesetting = content_translation.get("typesetting") or {}
+        app_id = str(typesetting.get("app_id") or "").strip()
+        app_key = str(typesetting.get("app_key") or "").strip()
         content_timeout = max(
             30, _bounded(content_translation.get("timeout_seconds"), 120, 300)
         )
@@ -701,25 +713,15 @@ class PixivBrowseMixin:
                         return None
                     if image is None:
                         raise ValueError("Pixiv image translation has no local image")
-                    if content_translation.get("mode", "text") == "overlay" and not (
+                    if content_method == "overlay" and not (
                         restricted and display == "link"
                     ):
                         rendered, translated = await asyncio.wait_for(
                             self._typeset_image_content(
                                 image,
                                 content_language,
-                                str(
-                                    (content_translation.get("typesetting") or {}).get(
-                                        "app_id"
-                                    )
-                                    or ""
-                                ).strip(),
-                                str(
-                                    (content_translation.get("typesetting") or {}).get(
-                                        "app_key"
-                                    )
-                                    or ""
-                                ).strip(),
+                                app_id,
+                                app_key,
                             ),
                             timeout=content_timeout,
                         )

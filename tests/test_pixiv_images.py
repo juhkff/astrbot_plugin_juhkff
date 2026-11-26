@@ -77,6 +77,30 @@ class PixivImageTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(writes), 2)
         self.assertNotIn(loop_thread, reads + writes)
 
+    async def test_source_only_keeps_original_after_compatible_download(self):
+        self.module.cfg["max_image_mb"] = 0.000001
+        with patch.object(
+            pixiv, "fetch_bytes", AsyncMock(return_value=self.payload)
+        ) as fetch:
+            original = await self.module._download(
+                self.item, self.item, 0, source_only=True
+            )
+            self.assertIsNotNone(original)
+            assert original is not None
+            self.assertEqual(original.suffix, ".png")
+            self.assertEqual(original.read_bytes(), self.payload)
+            # A cached JPEG derivative must never replace the source-only result.
+            self.module.cfg["max_image_mb"] = 0
+            compatible = await self.module._download(self.item, self.item, 0)
+            assert compatible is not None
+            self.assertEqual(compatible.suffix, ".jpg")
+            again = await self.module._download(
+                self.item, self.item, 0, source_only=True
+            )
+            self.assertEqual(again, original)
+            self.assertEqual(original.read_bytes(), self.payload)
+            fetch.assert_awaited_once()
+
     def test_failed_cache_publish_keeps_previous_file_and_removes_temporary(self):
         target = self.folder / "original.png"
         target.write_bytes(self.payload)
@@ -324,8 +348,8 @@ class PixivImageTests(IsolatedAsyncioTestCase):
                 self.item, self.item, 0, source_only=True
             )
         assert path is not None
-        self.assertEqual(path.suffix, ".jpg")
-        self.assertEqual((path.parent / "original.png").read_bytes(), self.payload)
+        self.assertEqual(path.suffix, ".png")
+        self.assertEqual(path.read_bytes(), self.payload)
         with Image.open(path) as image:
             self.assertEqual(image.size, (8, 8))
         fetch.assert_awaited_once()

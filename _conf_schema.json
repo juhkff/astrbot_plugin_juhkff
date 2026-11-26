@@ -29,7 +29,7 @@
     "type": "object",
     "collapsed": true,
     "description": "主动群聊",
-    "hint": "可禁用官方 astrbot 系统插件，仅由本模块负责群聊触发和 Redis 上下文；模型、人格与工具复用框架核心。历史不按时间过期，重启保留，不修改官方配置。",
+    "hint": "可替代官方 astrbot 群聊触发，复用框架模型、人格与工具；Redis 历史重启保留。",
     "items": {
       "print_log": {
         "description": "打印日志",
@@ -41,7 +41,7 @@
         "type": "bool",
         "description": "启用",
         "default": false,
-        "hint": "默认关闭。禁用官方 astrbot 后，本模块独立负责指定群的主动回复与群聊上下文。"
+        "hint": "禁用官方 astrbot 后，由本模块负责指定群的主动回复与上下文。"
       },
       "groups": {
         "type": "list",
@@ -59,19 +59,19 @@
           "max": 100,
           "step": 1
         },
-        "hint": "每个会话保留最近 1～100 条群友消息和机器人回复；每条原文及图片描述各最多 2000 字符，图片 URL/base64 不受此文字截断限制。不按时间过期，重启保留；超出条数上限时移除最旧记录。"
+        "hint": "保留最近消息及回复，超量删最旧；原文和图片描述各限 2000 字符，图片数据不截断。历史不过期，重启保留。"
       },
       "redis_url": {
         "type": "string",
         "description": "Redis 连接地址",
         "default": "redis://localhost:6379/0",
-        "hint": "支持 redis://:密码@主机:端口/数据库 和 rediss://。需自行启动 Redis 服务；连接失败时不使用内存或数据库历史替代。"
+        "hint": "需自备 Redis，支持 redis://:密码@主机:端口/数据库 及 rediss://；连接失败无历史回退。"
       },
       "redis_prefix": {
         "type": "string",
         "description": "Redis 键前缀",
         "default": "astrbot:juhkff:group_chat",
-        "hint": "历史保存在该前缀下；重置只清理对应会话。多个 AstrBot 实例应使用不同前缀，避免历史混用。"
+        "hint": "历史存于此前缀，重置仅清理当前会话；多实例请用不同前缀。"
       },
       "probability": {
         "type": "float",
@@ -82,13 +82,13 @@
           "max": 1,
           "step": 0.01
         },
-        "hint": "未设置分群概率时使用。每条普通消息独立抽取，无接话冷却；0 禁止随机接话，不影响 @ 等唤醒回复及文字模式图片转述。"
+        "hint": "无分群设置时使用，每条独立抽取，无冷却；0 停用随机接话，仍响应唤醒和转述图片。"
       },
       "group_rates": {
         "description": "分群接话概率",
         "type": "template_list",
         "default": [],
-        "hint": "为指定群单独设置接话概率；未设置的群用默认值，同群多条规则只用第一条。不会扩大生效群范围。",
+        "hint": "覆盖指定群概率，同群仅首条生效；未匹配沿用默认值，不扩大生效群范围。",
         "templates": {
           "rule": {
             "name": "分群设置",
@@ -127,7 +127,7 @@
           "原图模式",
           "文字模式"
         ],
-        "hint": "原图模式：直接读取当前和历史图片，需视觉模型。文字模式：先转成描述再聊天。两种模式均保留原图。"
+        "hint": "原图模式需视觉模型；文字模式先转成描述。均保留原图及历史图片。"
       },
       "caption_settings": {
         "type": "object",
@@ -141,13 +141,13 @@
             "description": "图片转述模型",
             "default": "",
             "_special": "select_provider",
-            "hint": "选择支持图片的模型；留空使用默认转述模型或当前聊天模型。每条图片消息都会转述，不受接话概率影响。"
+            "hint": "需支持图片；留空用默认转述或当前聊天模型。每条图片均转述，不受接话概率影响。"
           },
           "detect_meme": {
             "type": "bool",
             "description": "判断是否为表情包",
             "default": true,
-            "hint": "开启：判断表情包并描述情绪或梗。关闭：只描述图片内容。不影响偷表情功能。"
+            "hint": "开启时识别表情包情绪或梗，关闭时仅描述内容；不影响偷表情。"
           }
         }
       },
@@ -328,7 +328,7 @@
             "items": {
               "type": "string"
             },
-            "hint": "可添加多个 Key 进行轮询。Get a key at https://dashboard.exa.ai",
+            "hint": "多 Key 轮询；申请：https://dashboard.exa.ai",
             "secret": true,
             "condition": {
               "websearch_provider": "exa",
@@ -342,7 +342,7 @@
             "items": {
               "type": "string"
             },
-            "hint": "可添加多个 Key 进行轮询。留空则使用匿名模式（每日免费额度）。申请地址：https://anysearch.com/console/api-keys",
+            "hint": "多 Key 轮询；留空用每日免费匿名额度。申请：https://anysearch.com/console/api-keys",
             "condition": {
               "websearch_provider": "anysearch",
               "web_search": true
@@ -356,7 +356,7 @@
             "items": {
               "type": "string"
             },
-            "hint": "Configure a DeepSeek API key for search and page extraction. Multiple keys rotate. Get a key: [https://platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)",
+            "hint": "搜索及网页提取用，多 Key 轮询；申请：https://platform.deepseek.com/api_keys",
             "secret": true,
             "condition": {
               "websearch_provider": "deepseek",
@@ -370,7 +370,7 @@
             "items": {
               "type": "string"
             },
-            "hint": "支持 Google 网页、新闻、图片、学术和财经搜索。可添加多个 Key 轮询。获取 Key：[https://serpapi.com/manage-api-key](https://serpapi.com/manage-api-key)",
+            "hint": "多 Key 轮询；申请：https://serpapi.com/manage-api-key",
             "secret": true,
             "condition": {
               "websearch_provider": "serpapi",
@@ -422,7 +422,7 @@
           "buffer_intermediate_messages": {
             "description": "合并 Agent 中间消息",
             "type": "bool",
-            "hint": "开启后，非流式模式下多步工具调用过程中产生的中间文本将缓冲，待 Agent 完成后合并为一条回复发送。",
+            "hint": "非流式模式下，工具调用的中间文本在任务完成后合并发送。",
             "condition": {
               "streaming_response": false
             },
@@ -450,7 +450,7 @@
               "Skills-like（两阶段）",
               "Full（完整参数）"
             ],
-            "hint": "skills-like 先下发工具名称与描述，再下发参数；full 一次性下发完整参数。",
+            "hint": "skills-like 分两步下发名称描述与参数；full 一次下发完整参数。",
             "default": "full"
           },
           "tool_call_timeout": {
@@ -461,13 +461,13 @@
           "sanitize_context_by_modalities": {
             "description": "按模型能力清理历史上下文",
             "type": "bool",
-            "hint": "开启后，在每次请求 LLM 前会按当前模型提供商中所选择的模型能力删除对话中不支持的图片/工具调用结构（会改变模型看到的历史）",
+            "hint": "请求前移除当前模型不支持的图片或工具调用结构，会改变模型看到的历史。",
             "default": false
           },
           "add_cron_tools": {
             "description": "启用定时任务工具",
             "type": "bool",
-            "hint": "启用后，将会传递给 Agent 相关工具来实现主动型 Agent。你可以告诉 AstrBot 未来某个时间要做的事情，它将被定时触发然后执行任务。",
+            "hint": "允许模型创建定时任务，在指定时间自动执行。",
             "default": true
           }
         }
@@ -495,13 +495,13 @@
           "kb_final_top_k": {
             "description": "最终返回结果数",
             "type": "int",
-            "hint": "从知识库中检索到的结果数量，越大可能获得越多相关信息，但也可能引入噪音。建议根据实际需求调整",
+            "hint": "最终保留的检索条数；越大信息越多，也可能增加噪音。",
             "default": 5
           },
           "kb_agentic_mode": {
             "description": "Agentic 知识库检索",
             "type": "bool",
-            "hint": "启用后，知识库检索将作为 LLM Tool，由模型自主决定何时调用知识库进行查询。需要模型支持函数调用能力。",
+            "hint": "由模型自主调用知识库检索工具，需支持函数调用。",
             "default": false
           }
         }
@@ -531,7 +531,7 @@
           "prompt_prefix": {
             "description": "用户提示词",
             "type": "string",
-            "hint": "可使用 {{prompt}} 作为用户输入的占位符。如果不输入占位符则代表添加在用户输入的前面。",
+            "hint": "用 {{prompt}} 代表用户输入；不含占位符时添加到输入前。",
             "collapsed": true,
             "default": "{{prompt}}"
           },
@@ -566,7 +566,7 @@
           "warn_on_action_failure": {
             "description": "引用解析 action 失败告警",
             "type": "bool",
-            "hint": "开启后，get_msg/get_forward_msg 全部尝试失败时输出 warning 日志。",
+            "hint": "get_msg/get_forward_msg 均失败时记录警告。",
             "collapsed": true,
             "default": false
           },
@@ -720,7 +720,7 @@
         "description": "表情判断模型",
         "default": "",
         "_special": "select_provider",
-        "hint": "选择支持图片输入的模型；留空跳过判断，不使用群聊模型。仅在开启表情判断时生效。"
+        "hint": "开启判断时使用，需支持图片；留空跳过，不使用群聊模型。"
       },
       "max_per_group": {
         "description": "每群收藏上限（张）",
@@ -737,7 +737,7 @@
         "description": "默认发图概率",
         "type": "float",
         "default": 0.2,
-        "hint": "每条群消息发图的概率，0.2 表示 20%。优先用本群收藏，无可用收藏时用本地文件夹；0 不发图，仍收藏。",
+        "hint": "每条群消息的发图概率；优先群收藏，无可用时用本地表情。0 不发图，仍收藏。",
         "slider": {
           "min": 0,
           "max": 1,
@@ -748,13 +748,13 @@
         "description": "本地表情包文件夹",
         "type": "string",
         "default": "",
-        "hint": "本群无可用收藏时使用，支持子文件夹；相对路径从插件数据目录算起。留空停用，文件列表缓存 60 秒。"
+        "hint": "群收藏不可用时使用，含子目录；相对插件数据目录，留空停用。列表缓存 60 秒。"
       },
       "group_rates": {
         "description": "分群发图概率",
         "type": "template_list",
         "default": [],
-        "hint": "为指定群单独设置发图概率；未设置的群用默认值，同群多条规则只用第一条。不影响收藏。",
+        "hint": "覆盖指定群概率，同群仅首条生效；未匹配沿用默认值，不影响收藏。",
         "templates": {
           "rule": {
             "name": "分群设置",
@@ -791,7 +791,7 @@
           "max": 336,
           "step": 1
         },
-        "hint": "同群相同图片从首次计数起，在此时长内第二次出现即收藏，超时重新计数；0 不过期。此设置不清理已收藏图片。"
+        "hint": "从首次出现起计时，同群同图再次出现即收藏；超时重计，0 不过期。不清理已收藏图片。"
       }
     }
   },
@@ -851,7 +851,7 @@
         "description": "提前生成",
         "type": "bool",
         "default": false,
-        "hint": "按下方时间提前生成日报，减少发送时的等待；随机样式准备五款，固定样式只准备所选款。"
+        "hint": "提前生成以减少发送等待；随机样式准备五款，固定样式仅准备所选款。"
       },
       "push_hour": {
         "description": "推送时间（时）",
@@ -914,13 +914,13 @@
     "type": "object",
     "collapsed": true,
     "description": "Pixiv 订阅与浏览",
-    "hint": "订阅画师新插画，查看或监测日榜、周榜、月榜，随机取图或按作品 ID 点图。首次订阅或重启后只记录最新作品；日榜自动推送和榜单变动监测默认关闭。所有入口共用下方内容规则、图片缓存和压缩设置。",
+    "hint": "订阅画师、查看榜单、随机取图和作品点图；各入口共用内容及图片设置。",
     "items": {
       "print_log": {
         "description": "打印日志",
         "type": "bool",
         "default": true,
-        "hint": "打印本模块的运行日志；关闭后不输出任何级别的日志。"
+        "hint": "关闭后不输出本模块日志。"
       },
       "enable": {
         "description": "启用",
@@ -931,7 +931,7 @@
         "description": "支持命令无pixiv前缀",
         "type": "bool",
         "default": true,
-        "hint": "开启后可用 #订阅 UID、#取消订阅 UID、日榜、周榜、月榜、随机 [关键词]、作品 ID或链接 [第N张]；简写可带 #、/ 或直接发送。"
+        "hint": "允许省略 pixiv 前缀，如 #订阅、日榜、随机、作品 ID。"
       },
       "processing_concurrency": {
         "description": "共享处理池并发上限",
@@ -942,18 +942,18 @@
           "max": 32,
           "step": 1
         },
-        "hint": "全部群及 Pixiv 取图入口共用的活跃处理任务上限，默认 10，范围 1–32。不同作品不再逐部等待；作品分页准备与标题／简介翻译、各页下载与内容翻译／嵌字共享名额，结果仍按作品和分页原顺序组装。网络使用异步调用；百度图片翻译另设同一实例最多 1 个并发请求。上限不按群数叠加，模型或百度接口限流时可调低。修改后重载插件生效；AstrBot 工具调用总超时仍独立生效。"
+        "hint": "全部群及入口共用，结果保持原顺序；百度请求额外限制为 1 个并发。重载生效。"
       },
       "auto_translate": {
-        "description": "自动翻译",
+        "description": "标题与简介翻译",
         "type": "object",
-        "hint": "翻译作品标题及画师填写的简介，适用于全部 Pixiv 取图与推送入口。",
+        "hint": "每部作品调用一次群聊模型，与图片文字翻译独立。",
         "items": {
           "enable": {
             "description": "启用自动翻译",
             "type": "bool",
             "default": false,
-            "hint": "使用接收群当前配置的聊天模型，每个作品调用一次，会增加模型用量和等待时间。超时、模型不可用或翻译失败时发送原文；不修改图片和画师姓名。"
+            "hint": "失败时保留原文，会增加模型用量。"
           },
           "language": {
             "description": "翻译语言",
@@ -967,15 +967,32 @@
         }
       },
       "content_translation": {
-        "description": "作品内容翻译",
+        "description": "图片文字翻译",
         "type": "object",
-        "hint": "独立于标题、简介的自动翻译，适用于所有 Pixiv 取图与推送入口。默认纯文本；选择嵌字后将整张图片交给百度翻译开放平台图片翻译 API，云端完成 OCR、翻译和图片渲染，另存结果并保留原图。识别、翻译或嵌字失败时提示「翻译暂不可用」并继续发送原图，不使用本地排版或回退纯文本。所有群和入口共用处理池，默认 10；百度图片翻译请求同一实例最多并发 1 个，结果保持原顺序。单页超时默认 120 秒，从获得处理池名额并完成下载后开始，包含等待百度图片翻译名额的时间，不含处理池排队与下载。R18 原图链接展示仍使用识图模型生成纯文本译文，不调用百度图片翻译。",
+        "hint": "纯文本使用识图模型，嵌字使用百度；R18 链接始终附纯文本译文。",
         "items": {
+          "method": {
+            "description": "翻译方式",
+            "type": "string",
+            "default": "",
+            "options": [
+              "off",
+              "text",
+              "overlay"
+            ],
+            "labels": [
+              "关闭",
+              "纯文本",
+              "百度嵌字"
+            ],
+            "hint": "纯文本附在图片后；嵌字生成译文图片，失败时保留原图。"
+          },
           "enable": {
             "description": "启用作品内容翻译",
             "type": "bool",
             "default": false,
-            "hint": "默认关闭；开启后逐张识别图片文字并翻译。纯文本模式不改图片，嵌字模式另存译文副本并保留原图。"
+            "hint": "默认关闭；开启后逐张识别图片文字并翻译。纯文本模式不改图片，嵌字模式另存译文副本并保留原图。",
+            "invisible": true
           },
           "mode": {
             "description": "翻译方式",
@@ -989,33 +1006,30 @@
               "纯文本"
             ],
             "default": "text",
-            "condition": {
-              "enable": true
-            },
-            "hint": "默认纯文本，在图片后附识图模型译文。嵌字仅使用下方配置的百度翻译开放平台图片翻译 API，由云端完成 OCR、翻译和图片渲染，无需部署本地服务或模型；失败时发原图及「翻译暂不可用」，不回退本地排版或纯文本。R18 原图链接展示始终使用纯文本。"
+            "hint": "默认纯文本，在图片后附识图模型译文。嵌字仅使用下方配置的百度翻译开放平台图片翻译 API，由云端完成 OCR、翻译和图片渲染，无需部署本地服务或模型；失败时发原图及「翻译暂不可用」，不回退本地排版或纯文本。R18 原图链接展示始终使用纯文本。",
+            "invisible": true
           },
           "typesetting": {
             "description": "百度图片翻译",
             "type": "object",
-            "condition": {
-              "enable": true,
-              "mode": "overlay"
-            },
-            "hint": "在 https://api.fanyi.baidu.com/product/22 创建应用并开通图片翻译，填写百度翻译开放平台的 AppID 和密钥。云端完成 OCR、翻译和图片渲染，无需部署本地服务或模型。按 https://api.fanyi.baidu.com/doc/26，原图须为不超过 4 MiB 的 PNG/JPEG，最短边至少 30px、最长边不超过 4096px、长宽比不超过 3:1；超限不压缩并按翻译不可用处理。返回 69004（识别内容为空）时正常发原图，不提示翻译失败。费用及免费额度以官方账户为准，未命中缓存的成功页面会计入官方用量。",
+            "hint": "开通百度翻译开放平台图片翻译服务；费用以账户套餐为准。",
             "items": {
               "app_id": {
                 "description": "AppID",
                 "type": "string",
                 "default": "",
-                "hint": "百度翻译开放平台应用的 AppID；不是百度智能云 APIKey，也不是 DeepSeek 凭据。留空时嵌字不可用。"
+                "hint": "百度翻译开放平台 AppID，不是百度智能云 APIKey。"
               },
               "app_key": {
                 "description": "密钥",
                 "type": "string",
                 "secret": true,
                 "default": "",
-                "hint": "与 AppID 对应的百度翻译开放平台密钥；不是百度智能云 SecretKey，也不是 DeepSeek API Key。留空时嵌字不可用。"
+                "hint": "与 AppID 配套的应用密钥；留空则嵌字不可用。"
               }
+            },
+            "condition": {
+              "method": "overlay"
             }
           },
           "timeout_seconds": {
@@ -1027,37 +1041,45 @@
               "max": 300,
               "step": 10
             },
-            "condition": {
-              "enable": true
-            },
-            "hint": "纯文本翻译与嵌字共用，默认 120 秒，可设置 30–300 秒；旧配置未填写也使用 120 秒。从获得共享处理池名额并完成下载后开始，包含模型调用或等待百度图片翻译名额及云端处理，不含共享处理池排队与下载。云端处理较慢时可尝试 180 秒；接口自身的更短超时仍可能提前中断。超时后云端任务可能仍在运行，插件不自动重试。"
+            "hint": "包含翻译服务排队，不含下载；超时发原图，不自动重试。"
           },
           "provider_id": {
-            "description": "内容翻译识图模型",
+            "description": "识图模型",
             "type": "string",
             "default": "",
             "_special": "select_provider",
-            "condition": {
-              "enable": true
-            },
-            "hint": "仅用于纯文本模式及 R18 原图链接的文字翻译。可指定支持图片输入的模型；留空使用接收群当前的聊天模型，也需支持图片。嵌字模式由百度云端完成，不使用此模型。"
+            "hint": "纯文本及 R18 链接使用；留空沿用群聊模型，需支持图片。"
           },
           "language": {
             "description": "翻译语言",
             "type": "string",
             "default": "中文",
-            "condition": {
-              "enable": true
-            },
-            "hint": "图片内文字的目标语言，留空使用中文，独立于标题、简介的翻译语言。嵌字时将支持的语言名称或代码映射为百度目标语言代码，例如中文／zh、英语／en、日语／jp；官方目标语言列表不包含繁体中文 cht，不支持的语言不会提交百度请求。"
+            "hint": "留空用中文。百度嵌字支持 zh/en/jp 等，不支持 cht。"
           }
         }
+      },
+      "r18_policy": {
+        "description": "R18 内容策略",
+        "type": "string",
+        "default": "",
+        "options": [
+          "block",
+          "link",
+          "image"
+        ],
+        "labels": [
+          "过滤",
+          "仅发原图链接",
+          "发送原图"
+        ],
+        "hint": "适用于所有入口；分群规则可覆盖。R18-G 同样处理。"
       },
       "filter_r18": {
         "description": "过滤 R18 作品",
         "type": "bool",
         "default": true,
-        "hint": "开启时过滤 xRestrict 非 0 的作品。统一作用于订阅、榜单、随机和点图；匹配分群内容规则时使用该群设置。"
+        "hint": "开启时过滤 xRestrict 非 0 的作品。统一作用于订阅、榜单、随机和点图；匹配分群内容规则时使用该群设置。",
+        "invisible": true
       },
       "r18_display": {
         "description": "R18 展示方式",
@@ -1071,13 +1093,14 @@
           "原图"
         ],
         "default": "link",
-        "hint": "关闭 R18 过滤后生效：原图链接发送真实原图地址，原图方式发送图片；R18／R18-G 始终使用合并转发，单项先发独立 NSFW 提示。所有入口混合全年龄和 R18 内容时，先放全年龄，再加转发内 NSFW 分割线，最后放 R18，分组内保留作品及分页顺序。"
+        "hint": "关闭 R18 过滤后生效：原图链接发送真实原图地址，原图方式发送图片；R18／R18-G 始终使用合并转发，单项先发独立 NSFW 提示。所有入口混合全年龄和 R18 内容时，先放全年龄，再加转发内 NSFW 分割线，最后放 R18，分组内保留作品及分页顺序。",
+        "invisible": true
       },
       "group_content_rules": {
         "description": "分群内容规则",
         "type": "template_list",
         "default": [],
-        "hint": "覆盖指定群的 R18 过滤及展示方式；同群匹配多条时只用第一条，未匹配时沿用全局设置。适用群留空的规则不生效。",
+        "hint": "按群覆盖 R18 策略；同群只用首条匹配规则，未匹配则沿用全局。",
         "templates": {
           "rule": {
             "name": "分群内容设置",
@@ -1087,13 +1110,14 @@
                 "type": "list",
                 "default": [],
                 "_special": "umo",
-                "hint": "通过与画师订阅相同的会话选择器选择群，可多选；留空则此规则不生效。"
+                "hint": "可多选；留空则此规则不生效。"
               },
               "filter_r18": {
                 "description": "过滤 R18 作品",
                 "type": "bool",
                 "default": true,
-                "hint": "开启时过滤 xRestrict 非 0 的作品，作用于本群的订阅、榜单、随机和点图。"
+                "hint": "开启时过滤 xRestrict 非 0 的作品，作用于本群的订阅、榜单、随机和点图。",
+                "invisible": true
               },
               "r18_display": {
                 "description": "R18 展示方式",
@@ -1107,7 +1131,24 @@
                   "原图"
                 ],
                 "default": "link",
-                "hint": "本群关闭过滤后生效：发送真实原图地址，或直接发送原图。"
+                "hint": "本群关闭过滤后生效：发送真实原图地址，或直接发送原图。",
+                "invisible": true
+              },
+              "r18_policy": {
+                "description": "R18 内容策略",
+                "type": "string",
+                "default": "block",
+                "options": [
+                  "block",
+                  "link",
+                  "image"
+                ],
+                "labels": [
+                  "过滤",
+                  "仅发原图链接",
+                  "发送原图"
+                ],
+                "hint": "这些群的 R18／R18-G 处理方式。"
               }
             }
           }
@@ -1118,7 +1159,7 @@
         "type": "string",
         "secret": true,
         "default": "",
-        "hint": "只需填写 PHPSESSID 的值，无需 PHPSESSID= 前缀；兼容完整 Cookie，留空则未登录。"
+        "hint": "填写 PHPSESSID 值，也兼容完整 Cookie；留空为未登录。"
       },
       "ranking": {
         "description": "榜单设置",
@@ -1133,7 +1174,7 @@
               "max": 20,
               "step": 1
             },
-            "hint": "每个榜最多发送的作品数，默认 3，不限制榜单变动监测。群允许 R18 时，日榜／周榜及定时日榜分别取全年龄榜和对应 R18 榜各最多此数量，在同一条合并转发中先全年龄，再 NSFW 分割线，再 R18；月榜保持全年龄。R18 沿用分群过滤和原图／链接规则。仅在此配置，榜单命令不接收数量参数。多图作品嵌套为内层转发，第一条单独显示来源信息，后续只放图片；全年龄单图作品可直接发送，R18／R18-G 单项先单独发送 ------- NSFW ------- 提示，再使用合并转发。保留原排名、标题、画师和作品链接，不额外显示分页序号。数量按作品数计算。"
+            "hint": "每个榜发送的作品数，包含全部分页；不限制榜单变动监测。"
           },
           "pool_pages": {
             "description": "无关键词随机池页数",
@@ -1144,18 +1185,19 @@
               "max": 10,
               "step": 1
             },
-            "hint": "无关键词的 #pixiv随机 从日榜读取这些页构建较大的候选池，再随机选择作品。"
+            "hint": "无关键词的 #pixiv随机 从日榜读取这些页构建较大的候选池，再随机选择作品。",
+            "invisible": true
           },
           "monitor": {
             "description": "榜单变动监测",
             "type": "object",
-            "hint": "启动或重载时仅建立当前榜单 ID 基线；之后只推送新加入且未命中本群最近 200 条推送历史的作品，排名变化不推。与自动随机发图共用历史，成功发送才记录；日榜定时推送独立。",
+            "hint": "首次仅建立基线，之后推送新上榜作品；与随机发图共享去重历史。",
             "items": {
               "enable": {
                 "description": "启用榜单变动监测",
                 "type": "bool",
                 "default": false,
-                "hint": "默认关闭；开启并选择接收群后生效。修改设置后重载插件。重启重新建立基线，不补发停机消息。"
+                "hint": "需选择接收群；修改后重载。"
               },
               "mode": {
                 "description": "监测榜单",
@@ -1171,7 +1213,7 @@
                   "周榜",
                   "月榜"
                 ],
-                "hint": "选择日／周／月榜。允许 R18 的群在日榜／周榜额外监测对应 R18 榜，分别建立基线；每轮与上一轮成功获取的 ID 集合比较，同群新增作品先全年龄、NSFW 分割线、再 R18，合并为一次发送。月榜仅全年龄。"
+                "hint": "允许 R18 的群同时监测对应日／周榜；月榜仅全年龄。"
               },
               "check_minutes": {
                 "description": "监测间隔（分钟）",
@@ -1182,7 +1224,7 @@
                   "max": 1440,
                   "step": 1
                 },
-                "hint": "建议 1～1440 分钟，默认 30；获取失败不更新上一轮基线，等待后续检查。"
+                "hint": "获取失败时保留基线，下轮再试。"
               },
               "pages": {
                 "description": "监测前几页",
@@ -1193,14 +1235,14 @@
                   "max": 10,
                   "step": 1
                 },
-                "hint": "监测榜单前 N 页，每页约 50 部作品；默认前 10 页。日／周榜允许 R18 时两类榜各监测这些页；同群新增作品连同全部分页合并在一条消息，不受 ranking.count 限制。"
+                "hint": "每页约 50 部；新上榜作品不受榜单作品数量限制。"
               },
               "groups": {
                 "description": "监测接收群",
                 "type": "list",
                 "default": [],
                 "_special": "umo",
-                "hint": "可多选，留空不推送。沿用内容规则、翻译、缓存及图片处理；各群发送失败下轮补试，已掉出监测范围的待发送作品不补。榜单基线与待发送 ID 仅保存在内存；成功推送共用自动随机发图的每群 200 条历史，重载或重启后继续去重。"
+                "hint": "可多选，留空不推送；发送失败下轮补试，掉榜后不补。"
               }
             }
           },
@@ -1212,7 +1254,7 @@
                 "description": "启用日榜自动推送",
                 "type": "bool",
                 "default": false,
-                "hint": "默认关闭；开启并选择接收群后按时间推送日榜，不影响画师订阅。"
+                "hint": "按时发送日榜，与榜单变动监测独立。"
               },
               "time": {
                 "description": "日榜推送时间",
@@ -1225,7 +1267,7 @@
                 "type": "list",
                 "default": [],
                 "_special": "umo",
-                "hint": "选择自动接收日榜的群，可多选；留空不推送日榜，不影响画师订阅。"
+                "hint": "可多选，留空不推送。"
               }
             }
           }
@@ -1256,6 +1298,17 @@
               "step": 1
             },
             "hint": "有关键词或标签时，从这些搜索结果页中随机选择作品。"
+          },
+          "pool_pages": {
+            "description": "无关键词随机池页数",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 1,
+              "max": 10,
+              "step": 1
+            },
+            "hint": "无关键词时，从日榜前几页随机抽取；默认 5 页。"
           }
         }
       },
@@ -1267,32 +1320,32 @@
             "description": "启用随机发图",
             "type": "bool",
             "default": false,
-            "hint": "开启后按下限和上限随机等待，再向接收群各推送一部作品，每轮结束后重新随机计时。使用 Pixiv 发现推荐池，需配置有效 Cookie；不从排行榜选图。修改后重载插件生效。"
+            "hint": "从发现推荐池取图，需有效 Cookie；修改后重载。"
           },
           "min_minutes": {
             "description": "随机等待下限（分钟）",
             "type": "int",
             "default": 1,
-            "hint": "正整数，包含端点，默认 1。上下限相同时为固定间隔；下限大于上限时自动交换。非正整数按默认值处理。"
+            "hint": "正整数；上下限相同为固定间隔，填反自动交换。"
           },
           "max_minutes": {
             "description": "随机等待上限（分钟）",
             "type": "int",
             "default": 120,
-            "hint": "正整数，包含端点，默认 120，可设置为超过 120 的分钟数。非正整数按默认值处理；每轮结束后按配置范围重新随机。"
+            "hint": "每轮结束后重新随机等待，可超过 120 分钟。"
           },
           "groups": {
             "description": "随机发图接收群",
             "type": "list",
             "default": [],
             "_special": "umo",
-            "hint": "选择接收随机作品的群，可多选；留空不发图。每群发送一部作品的全部分页，沿用全局及分群内容规则、自动翻译、图片处理和传递方式。"
+            "hint": "可多选，留空不推送；每群每轮一部作品及全部分页。"
           },
           "min_views": {
             "description": "最低浏览量",
             "type": "int",
             "default": 10000,
-            "hint": "仅从实际浏览量达到此值的候选作品中随机选择，默认 10000。没有合适作品时补取发现推荐，每批 60 部、最多检查 12 部详情，每群每轮最多 5 批（含首批）；连续两批没有新 ID 时提前结束。跨批及最近 200 条已推送 ID 去重，仍无合适作品时等待下一次随机间隔，不回退到排行榜。"
+            "hint": "按实际浏览量筛选；排除最近 200 部已推送作品，无合适候选则跳过。"
           }
         }
       },
@@ -1300,7 +1353,7 @@
         "description": "画师订阅列表",
         "type": "template_list",
         "default": [],
-        "hint": "每位画师填写一条，并选择接收群；群内订阅指令会同步到这里。留空不检查、不推送。",
+        "hint": "每位画师一条；群内订阅指令同步到此处。",
         "templates": {
           "artist": {
             "name": "画师订阅",
@@ -1326,7 +1379,7 @@
         "description": "检查间隔（分钟）",
         "type": "int",
         "default": 60,
-        "hint": "正常情况下，每隔多久检查一次画师新作，发现新作后自动推送。",
+        "hint": "画师新作检查间隔。",
         "slider": {
           "min": 1,
           "max": 1440,
@@ -1337,7 +1390,7 @@
         "description": "重试基础间隔（分钟）",
         "type": "int",
         "default": 2,
-        "hint": "获取作品、下载或发送失败后的首次等待时间。设为 2 时，连续失败依次等 2、4、6…分钟；成功后恢复正常检查。",
+        "hint": "订阅失败后按此间隔的 1、2、3…倍重试，成功后恢复正常。",
         "slider": {
           "min": 1,
           "max": 1440,
@@ -1348,7 +1401,7 @@
         "description": "图片缓存保留天数",
         "type": "int",
         "default": 7,
-        "hint": "按文件最后修改时间计算，定时删除保存已满指定天数的原图、预览图、压缩版和临时文件，并清理空目录；0 表示关闭自动清理。清理后再次取图会重新下载，不影响订阅进度。",
+        "hint": "按保存时间清理图片及副本；0 不清理，不影响订阅进度。",
         "slider": {
           "min": 0,
           "max": 365,
@@ -1359,7 +1412,7 @@
         "description": "图片缓存每日清理时间",
         "type": "string",
         "default": "00:00",
-        "hint": "HH:MM 格式，默认每天 0 点执行，采用全局时区。修改后重载插件生效。"
+        "hint": "HH:MM，使用全局时区；修改后重载。"
       },
       "image_transport": {
         "description": "图片传递方式",
@@ -1373,19 +1426,19 @@
           "本地文件（同机部署，单条转发）",
           "Base64（兼容独立部署）"
         ],
-        "hint": "默认使用本地文件，只传绝对文件路径，多图保持一条合并转发，保留全部图片和分页。AstrBot 与协议端须共用文件系统，协议端必须有权限读取图片缓存；不同容器须挂载相同路径，否则使用 Base64。Base64 模式通常按体积分批发送；全年龄／R18 混合内容及榜单分段保持一条转发，受协议端请求大小限制。手动取图和定时推送共用此设置。"
+        "hint": "本地文件要求协议端可读相同路径；独立部署选 Base64，可能分批发送。"
       },
       "image_format_compatibility": {
         "description": "图片格式兼容处理",
         "type": "bool",
         "default": true,
-        "hint": "默认开启：静态图片生成 JPEG 发送副本（质量 90），保留下载原图并复用副本缓存，减少部分原图在 QQ/NapCat 中无法送达的问题。自动校正 EXIF 方向，透明区域铺白；多帧图片保留原格式。手动取图和自动推送、文件和 Base64 方式均生效。关闭后保留原始格式，仅按压缩阈值处理。"
+        "hint": "静态图生成 JPEG 发送副本，原图保留；多帧图不转换。"
       },
       "max_image_mb": {
         "description": "图片压缩阈值（MB）",
         "type": "float",
         "default": 0.0,
-        "hint": "0 表示不限制发送体积；开启格式兼容处理时仍会生成 JPEG 副本。大于 0 时发送图片超过阈值会进一步压缩或缩小尺寸；开启兼容处理时，多帧图片超限会跳过，避免丢帧。始终优先下载并保留原图。",
+        "hint": "0 不压缩；正数时压缩或缩小发送副本。格式兼容处理独立生效。",
         "slider": {
           "min": 0,
           "max": 30,

@@ -1100,6 +1100,17 @@ class PixivBrowseTests(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "delivery stopped"):
             await self.host._render_items([item(pages=2)], self.umo)
 
+    async def test_random_pool_setting_overrides_legacy_ranking_pool(self):
+        self.host.cfg["random"] = {"pool_pages": 4, "search_pages": 3}
+        self.host._browse_candidates = AsyncMock(return_value=[])
+        await self.host._browse_selection(self.umo, mode="daily", randomized=True)
+        self.host._browse_candidates.assert_awaited_once_with("daily", 4, "")
+        self.host._browse_candidates.reset_mock()
+        await self.host._browse_selection(
+            self.umo, mode="daily", randomized=True, keyword="landscape"
+        )
+        self.host._browse_candidates.assert_awaited_once_with("daily", 3, "landscape")
+
     async def test_configuration_clamping_is_read_only(self):
         self.host.cfg["ranking"]["count"] = 100
         self.host.cfg["ranking"]["pool_pages"] = 100

@@ -43,6 +43,7 @@ from .common import (
 )
 from .http_utils import validate_url
 from .pixiv_browse import PixivBrowseMixin
+from .pixiv_config import migrate_pixiv_config
 from .pixiv_random import _RANDOM_HISTORY_LIMIT, PixivRandomMixin
 from .pixiv_ranking_monitor import PixivRankingMonitorMixin
 
@@ -140,6 +141,8 @@ class PixivPushModule(
     title = "Pixiv 订阅与浏览"
 
     def __init__(self, plugin: PluginLike) -> None:
+        if isinstance(plugin.config, AstrBotConfig):
+            migrate_pixiv_config(plugin.config)
         super().__init__(plugin)
         self._state_path: Path | None = None
         self._artists: dict[str, ArtistState] = {}
@@ -254,6 +257,11 @@ class PixivPushModule(
         """
         filtered = self.cfg.get("filter_r18", True) is not False
         display = self.cfg.get("r18_display", "link")
+        policy = self.cfg.get("r18_policy")
+        if policy in ("block", "link", "image"):
+            filtered = policy == "block"
+            if not filtered:
+                display = policy
         rules = self.cfg.get("group_content_rules", [])
         for rule in rules if isinstance(rules, list) else []:
             if not isinstance(rule, dict):
@@ -263,8 +271,13 @@ class PixivPushModule(
                 group in (umo, umo.split(":", 2)[-1]) for group in groups
             ):
                 continue
-            filtered = rule.get("filter_r18", filtered) is not False
-            display = rule.get("r18_display", display)
+            policy = rule.get("r18_policy")
+            if policy in ("block", "link", "image"):
+                filtered = policy == "block"
+                display = "image" if policy == "image" else "link"
+            else:
+                filtered = rule.get("filter_r18", filtered) is not False
+                display = rule.get("r18_display", display)
             break
         return filtered, "image" if display == "image" else "link"
 
@@ -910,7 +923,9 @@ class PixivPushModule(
             if not math.isfinite(limit_mb) or limit_mb < 0:
                 raise ValueError("Invalid Pixiv compression threshold")
             limit = int(limit_mb * 1024 * 1024)
-            compatible = self.cfg.get("image_format_compatibility", True)
+            compatible = not source_only and self.cfg.get(
+                "image_format_compatibility", True
+            )
             folder = data_dir() / "pixiv" / "images" / f"{item['id']}_p{index}"
             folder.mkdir(parents=True, exist_ok=True)
             # Source bytes stay separate from regular previews, old flat caches,
