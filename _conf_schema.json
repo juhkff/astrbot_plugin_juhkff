@@ -944,6 +944,77 @@
         },
         "hint": "全部群及入口共用，结果保持原顺序；百度请求额外限制为 1 个并发。重载生效。"
       },
+      "r18_policy": {
+        "description": "R18 内容策略",
+        "type": "string",
+        "default": "block",
+        "options": [
+          "block",
+          "link",
+          "image"
+        ],
+        "labels": [
+          "过滤",
+          "仅发原图链接",
+          "发送原图"
+        ],
+        "hint": "适用于所有入口；分群规则可覆盖。R18-G 同样处理。"
+      },
+      "cookie": {
+        "description": "Pixiv PHPSESSID（可选）",
+        "type": "string",
+        "secret": true,
+        "default": "",
+        "hint": "填写 PHPSESSID 值，也兼容完整 Cookie；留空为未登录。"
+      },
+      "cache_retention_days": {
+        "description": "图片缓存保留天数",
+        "type": "int",
+        "default": 7,
+        "hint": "按保存时间清理图片及副本；0 不清理，不影响订阅进度。",
+        "slider": {
+          "min": 0,
+          "max": 365,
+          "step": 1
+        }
+      },
+      "cache_cleanup_time": {
+        "description": "图片缓存每日清理时间",
+        "type": "string",
+        "default": "00:00",
+        "hint": "HH:MM，使用全局时区；修改后重载。"
+      },
+      "image_transport": {
+        "description": "图片传递方式",
+        "type": "string",
+        "default": "file",
+        "options": [
+          "file",
+          "base64"
+        ],
+        "labels": [
+          "本地文件（同机部署，单条转发）",
+          "Base64（兼容独立部署）"
+        ],
+        "hint": "本地文件要求协议端可读相同路径；独立部署选 Base64，可能分批发送。"
+      },
+      "image_format_compatibility": {
+        "description": "图片格式兼容处理",
+        "type": "bool",
+        "default": true,
+        "hint": "静态图生成 JPEG 发送副本，原图保留；多帧图不转换。"
+      },
+      "max_image_mb": {
+        "description": "图片压缩阈值（MB）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "0 不压缩；正数时压缩或缩小发送副本。格式兼容处理独立生效。",
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 0.5
+        }
+      },
       "auto_translate": {
         "description": "标题与简介翻译",
         "type": "object",
@@ -1061,44 +1132,6 @@
           }
         }
       },
-      "r18_policy": {
-        "description": "R18 内容策略",
-        "type": "string",
-        "default": "block",
-        "options": [
-          "block",
-          "link",
-          "image"
-        ],
-        "labels": [
-          "过滤",
-          "仅发原图链接",
-          "发送原图"
-        ],
-        "hint": "适用于所有入口；分群规则可覆盖。R18-G 同样处理。"
-      },
-      "filter_r18": {
-        "description": "过滤 R18 作品",
-        "type": "bool",
-        "default": true,
-        "hint": "开启时过滤 xRestrict 非 0 的作品。统一作用于订阅、榜单、随机和点图；匹配分群内容规则时使用该群设置。",
-        "invisible": true
-      },
-      "r18_display": {
-        "description": "R18 展示方式",
-        "type": "string",
-        "options": [
-          "link",
-          "image"
-        ],
-        "labels": [
-          "原图链接",
-          "原图"
-        ],
-        "default": "link",
-        "hint": "关闭 R18 过滤后生效：原图链接发送真实原图地址，原图方式发送图片；R18／R18-G 始终使用合并转发，单项先发独立 NSFW 提示。所有入口混合全年龄和 R18 内容时，先放全年龄，再加转发内 NSFW 分割线，最后放 R18，分组内保留作品及分页顺序。",
-        "invisible": true
-      },
       "group_content_rules": {
         "description": "分群内容规则",
         "type": "template_list",
@@ -1156,13 +1189,6 @@
             }
           }
         }
-      },
-      "cookie": {
-        "description": "Pixiv PHPSESSID（可选）",
-        "type": "string",
-        "secret": true,
-        "default": "",
-        "hint": "填写 PHPSESSID 值，也兼容完整 Cookie；留空为未登录。"
       },
       "ranking": {
         "description": "榜单设置",
@@ -1413,6 +1439,28 @@
           }
         }
       },
+      "filter_r18": {
+        "description": "过滤 R18 作品",
+        "type": "bool",
+        "default": true,
+        "hint": "开启时过滤 xRestrict 非 0 的作品。统一作用于订阅、榜单、随机和点图；匹配分群内容规则时使用该群设置。",
+        "invisible": true
+      },
+      "r18_display": {
+        "description": "R18 展示方式",
+        "type": "string",
+        "options": [
+          "link",
+          "image"
+        ],
+        "labels": [
+          "原图链接",
+          "原图"
+        ],
+        "default": "link",
+        "hint": "关闭 R18 过滤后生效：原图链接发送真实原图地址，原图方式发送图片；R18／R18-G 始终使用合并转发，单项先发独立 NSFW 提示。所有入口混合全年龄和 R18 内容时，先放全年龄，再加转发内 NSFW 分割线，最后放 R18，分组内保留作品及分页顺序。",
+        "invisible": true
+      },
       "subscriptions": {
         "description": "画师订阅列表",
         "type": "template_list",
@@ -1463,54 +1511,6 @@
           "step": 1
         },
         "invisible": true
-      },
-      "cache_retention_days": {
-        "description": "图片缓存保留天数",
-        "type": "int",
-        "default": 7,
-        "hint": "按保存时间清理图片及副本；0 不清理，不影响订阅进度。",
-        "slider": {
-          "min": 0,
-          "max": 365,
-          "step": 1
-        }
-      },
-      "cache_cleanup_time": {
-        "description": "图片缓存每日清理时间",
-        "type": "string",
-        "default": "00:00",
-        "hint": "HH:MM，使用全局时区；修改后重载。"
-      },
-      "image_transport": {
-        "description": "图片传递方式",
-        "type": "string",
-        "default": "file",
-        "options": [
-          "file",
-          "base64"
-        ],
-        "labels": [
-          "本地文件（同机部署，单条转发）",
-          "Base64（兼容独立部署）"
-        ],
-        "hint": "本地文件要求协议端可读相同路径；独立部署选 Base64，可能分批发送。"
-      },
-      "image_format_compatibility": {
-        "description": "图片格式兼容处理",
-        "type": "bool",
-        "default": true,
-        "hint": "静态图生成 JPEG 发送副本，原图保留；多帧图不转换。"
-      },
-      "max_image_mb": {
-        "description": "图片压缩阈值（MB）",
-        "type": "float",
-        "default": 0.0,
-        "hint": "0 不压缩；正数时压缩或缩小发送副本。格式兼容处理独立生效。",
-        "slider": {
-          "min": 0,
-          "max": 30,
-          "step": 0.5
-        }
       },
       "preferences_migrated": {
         "description": "偏好配置已迁移",
