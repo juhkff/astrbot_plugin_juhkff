@@ -288,7 +288,12 @@ class PixivPushModule(
             Artist IDs mapped to distinct, fully qualified group origins.
         """
         result: dict[str, list[str]] = {}
-        rows = self.cfg.get("subscriptions", [])
+        subscription = self.cfg.get("artist_subscription")
+        rows = (
+            subscription.get("list", [])
+            if isinstance(subscription, dict)
+            else self.cfg.get("subscriptions", [])
+        )
         if not isinstance(rows, list):
             return result
         for row in rows:
@@ -523,10 +528,14 @@ class PixivPushModule(
         previous = config.get(self.key)
         config[self.key] = {
             **self.cfg,
-            "subscriptions": [
-                {"__template_key": "artist", "user_id": uid, "groups": targets}
-                for uid, targets in subscriptions.items()
-            ],
+            "artist_subscription": {
+                **(self.cfg.get("artist_subscription") or {}),
+                "migrated": True,
+                "list": [
+                    {"__template_key": "artist", "user_id": uid, "groups": targets}
+                    for uid, targets in subscriptions.items()
+                ],
+            },
         }
         try:
             config.save_config()
@@ -578,15 +587,18 @@ class PixivPushModule(
                     self._failures.pop(user_id, None)
                 if stale:
                     self._persist_state()
+                subscription_settings = self.cfg.get("artist_subscription") or self.cfg
                 try:
-                    interval = float(self.cfg.get("check_minutes", 60))
+                    interval = float(subscription_settings.get("check_minutes", 60))
                     if not math.isfinite(interval):
                         raise ValueError("Non-finite Pixiv polling interval")
                     interval = max(1.0, interval) * 60
                 except (ValueError, TypeError, OverflowError):
                     interval = 3600.0
                 try:
-                    retry_base = float(self.cfg.get("retry_interval_minutes", 2))
+                    retry_base = float(
+                        subscription_settings.get("retry_interval_minutes", 2)
+                    )
                     if not math.isfinite(retry_base):
                         raise ValueError("Non-finite Pixiv retry interval")
                     retry_base = max(1.0, retry_base) * 60

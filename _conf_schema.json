@@ -1048,7 +1048,10 @@
             "type": "string",
             "default": "",
             "_special": "select_provider",
-            "hint": "纯文本及 R18 链接使用；留空沿用群聊模型，需支持图片。"
+            "condition": {
+              "method": "text"
+            },
+            "hint": "留空沿用群聊模型，需支持图片；R18 链接翻译也沿用此设置。"
           },
           "language": {
             "description": "翻译语言",
@@ -1191,7 +1194,7 @@
           "monitor": {
             "description": "榜单变动监测",
             "type": "object",
-            "hint": "首次仅建立基线，之后推送新上榜作品；与随机发图共享去重历史。",
+            "hint": "首次仅建立基线，之后推送新上榜作品；与不定期发图共享去重历史。",
             "items": {
               "enable": {
                 "description": "启用榜单变动监测",
@@ -1313,11 +1316,11 @@
         }
       },
       "random_push": {
-        "description": "随机发图",
+        "description": "不定期发图",
         "type": "object",
         "items": {
           "enable": {
-            "description": "启用随机发图",
+            "description": "启用不定期发图",
             "type": "bool",
             "default": false,
             "hint": "从发现推荐池取图，需有效 Cookie；修改后重载。"
@@ -1335,7 +1338,7 @@
             "hint": "每轮结束后重新随机等待，可超过 120 分钟。"
           },
           "groups": {
-            "description": "随机发图接收群",
+            "description": "不定期发图接收群",
             "type": "list",
             "default": [],
             "_special": "umo",
@@ -1346,6 +1349,67 @@
             "type": "int",
             "default": 10000,
             "hint": "按实际浏览量筛选；排除最近 200 部已推送作品，无合适候选则跳过。"
+          }
+        }
+      },
+      "artist_subscription": {
+        "description": "画师订阅",
+        "type": "object",
+        "hint": "检查画师新作并推送到订阅群；首次订阅只记录最新作品。",
+        "items": {
+          "list": {
+            "description": "订阅列表",
+            "type": "template_list",
+            "default": [],
+            "hint": "每位画师一条；群内订阅指令同步到此处。",
+            "templates": {
+              "artist": {
+                "name": "画师订阅",
+                "items": {
+                  "user_id": {
+                    "description": "画师 UID",
+                    "type": "string",
+                    "default": "",
+                    "hint": "画师主页中的数字用户 ID，不是作品 ID。"
+                  },
+                  "groups": {
+                    "description": "接收群",
+                    "type": "list",
+                    "default": [],
+                    "hint": "选择接收这位画师新作的群，可多选；不选群则此订阅不生效。",
+                    "_special": "umo"
+                  }
+                }
+              }
+            }
+          },
+          "check_minutes": {
+            "description": "检查间隔（分钟）",
+            "type": "int",
+            "default": 0,
+            "hint": "画师新作检查间隔。",
+            "slider": {
+              "min": 1,
+              "max": 1440,
+              "step": 1
+            }
+          },
+          "retry_interval_minutes": {
+            "description": "重试基础间隔（分钟）",
+            "type": "int",
+            "default": 0,
+            "hint": "订阅失败后按此间隔的 1、2、3…倍重试，成功后恢复正常。",
+            "slider": {
+              "min": 1,
+              "max": 1440,
+              "step": 1
+            }
+          },
+          "migrated": {
+            "type": "bool",
+            "default": false,
+            "invisible": true,
+            "description": "订阅配置已迁移"
           }
         }
       },
@@ -1373,7 +1437,8 @@
               }
             }
           }
-        }
+        },
+        "invisible": true
       },
       "check_minutes": {
         "description": "检查间隔（分钟）",
@@ -1384,7 +1449,8 @@
           "min": 1,
           "max": 1440,
           "step": 1
-        }
+        },
+        "invisible": true
       },
       "retry_interval_minutes": {
         "description": "重试基础间隔（分钟）",
@@ -1395,7 +1461,8 @@
           "min": 1,
           "max": 1440,
           "step": 1
-        }
+        },
+        "invisible": true
       },
       "cache_retention_days": {
         "description": "图片缓存保留天数",

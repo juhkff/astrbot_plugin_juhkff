@@ -108,11 +108,118 @@ class PixivConfigTests(TestCase):
                 "random": {"pool_pages": 2},
                 "ranking": {"pool_pages": 9},
                 "random_push": {"enable": False, "groups": ["test:GroupMessage:9"]},
+                "artist_subscription": {
+                    "list": [],
+                    "check_minutes": 60,
+                    "retry_interval_minutes": 2,
+                    "migrated": True,
+                },
             }
         )
         before = deepcopy(dict(config))
         self.assertFalse(migrate_pixiv_config(config))
         self.assertEqual(dict(config), before)
+
+    def test_constructor_migrates_legacy_artist_subscriptions_and_intervals(self):
+        subscriptions = [
+            {"user_id": "7", "groups": ["test:GroupMessage:1"]},
+            {"user_id": "8", "groups": ["test:GroupMessage:2"]},
+        ]
+        config = self.load(
+            {
+                "subscriptions": subscriptions,
+                "check_minutes": 137,
+                "retry_interval_minutes": 11,
+            }
+        )
+        settings = config["pixiv_push"]
+        self.assertEqual(settings["subscriptions"], subscriptions)
+        self.assertEqual(settings["artist_subscription"]["list"], [])
+        self.assertEqual(settings["artist_subscription"]["check_minutes"], 0)
+        self.assertEqual(settings["artist_subscription"]["retry_interval_minutes"], 0)
+        self.assertFalse(settings["artist_subscription"]["migrated"])
+        with patch.object(
+            AstrBotConfig,
+            "save_config",
+            autospec=True,
+            side_effect=AstrBotConfig.save_config,
+        ) as save:
+            module = PixivPushModule(SimpleNamespace(config=config))
+            save.assert_called_once_with(config)
+            self.assertFalse(migrate_pixiv_config(config))
+            save.assert_called_once_with(config)
+        expected = {
+            "list": subscriptions,
+            "check_minutes": 137,
+            "retry_interval_minutes": 11,
+            "migrated": True,
+        }
+        self.assertEqual(settings["artist_subscription"], expected)
+        self.assertEqual(
+            module._subscriptions(),
+            {"7": ["test:GroupMessage:1"], "8": ["test:GroupMessage:2"]},
+        )
+        reloaded = AstrBotConfig(config_path=str(self.path), schema=self.schema)
+        self.assertEqual(reloaded["pixiv_push"]["artist_subscription"], expected)
+        self.assertFalse(migrate_pixiv_config(reloaded))
+
+    def test_clearing_migrated_artist_list_survives_reload(self):
+        config = self.load(
+            {"subscriptions": [{"user_id": "7", "groups": ["test:GroupMessage:1"]}]}
+        )
+        PixivPushModule(SimpleNamespace(config=config))
+        settings = config["pixiv_push"]
+        self.assertTrue(settings["artist_subscription"]["migrated"])
+        self.assertTrue(settings["subscriptions"])
+        settings["artist_subscription"]["list"] = []
+        config.save_config()
+        reloaded = AstrBotConfig(config_path=str(self.path), schema=self.schema)
+        self.assertFalse(migrate_pixiv_config(reloaded))
+        module = PixivPushModule(SimpleNamespace(config=reloaded))
+        self.assertTrue(reloaded["pixiv_push"]["subscriptions"])
+        self.assertEqual(reloaded["pixiv_push"]["artist_subscription"]["list"], [])
+        self.assertEqual(module._subscriptions(), {})
+
+    def test_explicit_artist_subscription_values_win_over_legacy(self):
+        subscriptions = [{"user_id": "8", "groups": ["test:GroupMessage:2"]}]
+        config = self.load(
+            {
+                "subscriptions": [{"user_id": "7", "groups": ["test:GroupMessage:1"]}],
+                "check_minutes": 137,
+                "retry_interval_minutes": 11,
+                "artist_subscription": {
+                    "list": subscriptions,
+                    "check_minutes": 23,
+                    "retry_interval_minutes": 4,
+                },
+            }
+        )
+        module = PixivPushModule(SimpleNamespace(config=config))
+        expected = {
+            "list": subscriptions,
+            "check_minutes": 23,
+            "retry_interval_minutes": 4,
+            "migrated": True,
+        }
+        self.assertEqual(config["pixiv_push"]["artist_subscription"], expected)
+        self.assertEqual(module._subscriptions(), {"8": ["test:GroupMessage:2"]})
+        reloaded = AstrBotConfig(config_path=str(self.path), schema=self.schema)
+        self.assertFalse(migrate_pixiv_config(reloaded))
+        self.assertEqual(reloaded["pixiv_push"]["artist_subscription"], expected)
+
+    def test_artist_subscription_defaults_are_resolved_on_first_migration(self):
+        config = self.load({})
+        PixivPushModule(SimpleNamespace(config=config))
+        self.assertEqual(
+            config["pixiv_push"]["artist_subscription"],
+            {
+                "list": [],
+                "check_minutes": 60,
+                "retry_interval_minutes": 2,
+                "migrated": True,
+            },
+        )
+        self.assertFalse(migrate_pixiv_config(config))
 
     def test_legacy_translation_off_text_and_overlay(self):
         for enabled, mode, expected in (

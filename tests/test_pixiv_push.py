@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import time
 from pathlib import Path
@@ -261,6 +262,55 @@ class PixivPushTests(IsolatedAsyncioTestCase):
         self.module.cfg["cache_retention_days"] = 2
         await self.module.cleanup_image_cache()
         self.assertFalse(old.exists())
+
+    async def test_subscription_commands_persist_nested_list_and_rollback_on_failure(
+        self,
+    ):
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text()
+        )
+        path = self.folder / "plugin.json"
+        self.plugin.config = pixiv.AstrBotConfig(config_path=str(path), schema=schema)
+        module = pixiv.PixivPushModule(self.plugin)
+        self.modules.append(module)
+        module.check = AsyncMock()
+
+        def event(command):
+            return cast(
+                AstrMessageEvent,
+                SimpleNamespace(
+                    message_str=command,
+                    unified_msg_origin=self.groups[0],
+                    is_at_or_wake_command=False,
+                    get_message_type=lambda: pixiv.MessageType.GROUP_MESSAGE,
+                    plain_result=lambda text: pixiv.MessageChain().message(text),
+                ),
+            )
+
+        result = await module.handle(event("#pixiv订阅 7"))
+        assert result is not None
+        self.assertIn("已订阅", result.chain[0].text)
+        self.assertEqual(module._subscriptions(), {"7": [self.groups[0]]})
+        saved = json.loads(path.read_text(encoding="utf-8-sig"))["pixiv_push"]
+        self.assertEqual(saved["artist_subscription"]["list"][0]["user_id"], "7")
+        self.assertEqual(saved["subscriptions"], [])
+        with patch.object(
+            pixiv.AstrBotConfig, "save_config", side_effect=OSError("Write failed")
+        ):
+            result = await module.handle(event("#pixiv订阅 8"))
+        assert result is not None
+        self.assertIn("保存失败", result.chain[0].text)
+        self.assertEqual(module._subscriptions(), {"7": [self.groups[0]]})
+        result = await module.handle(event("#pixiv取消订阅 7"))
+        assert result is not None
+        self.assertIn("已取消", result.chain[0].text)
+        self.assertEqual(module._subscriptions(), {})
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8-sig"))["pixiv_push"][
+                "artist_subscription"
+            ]["list"],
+            [],
+        )
 
     async def test_subscription_aliases_share_validation_and_dynamic_help(self):
         for prefix in ("", "#", "/"):

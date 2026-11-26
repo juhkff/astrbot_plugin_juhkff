@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+from copy import deepcopy
 from typing import Any
 
 
@@ -68,6 +69,18 @@ def migrate_pixiv_config(config: MutableMapping[str, Any]) -> bool:
                 pages = 5
             random_settings["pool_pages"] = min(pages, 10)
             changed = True
+    subscription = settings.get("artist_subscription")
+    if isinstance(subscription, dict):
+        if not subscription.get("migrated", False):
+            # Import once so clearing the new list never restores legacy rows.
+            if not subscription.get("list"):
+                subscription["list"] = deepcopy(settings.get("subscriptions", []))
+            subscription["migrated"] = True
+            changed = True
+        for key, default in (("check_minutes", 60), ("retry_interval_minutes", 2)):
+            if subscription.get(key) in (None, 0):
+                subscription[key] = settings.get(key, default) or default
+                changed = True
     if changed:
         save = getattr(config, "save_config", None)
         if callable(save):
