@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -45,6 +46,45 @@ class PixivImageTests(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.module.stop()
+
+    async def test_source_and_derivative_cache_io_runs_outside_event_loop(self):
+        loop_thread = threading.get_ident()
+        reads, writes = [], []
+        read_bytes = Path.read_bytes
+        write_cache = pixiv._write_image_cache
+
+        def observed_read(path):
+            reads.append(threading.get_ident())
+            return read_bytes(path)
+
+        def observed_write(target, payload):
+            writes.append(threading.get_ident())
+            return write_cache(target, payload)
+
+        with (
+            patch.object(
+                pixiv, "fetch_bytes", AsyncMock(return_value=self.payload)
+            ) as fetch,
+            patch.object(Path, "read_bytes", observed_read),
+            patch.object(pixiv, "_write_image_cache", observed_write),
+        ):
+            first = await self.module._download(self.item, self.item, 0)
+            self.assertIsNotNone(first)
+            second = await self.module._download(self.item, self.item, 0)
+            self.assertEqual(first, second)
+            fetch.assert_awaited_once()
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(len(writes), 2)
+        self.assertNotIn(loop_thread, reads + writes)
+
+    def test_failed_cache_publish_keeps_previous_file_and_removes_temporary(self):
+        target = self.folder / "original.png"
+        target.write_bytes(self.payload)
+        with patch.object(Path, "replace", side_effect=OSError("Publish failed")):
+            with self.assertRaisesRegex(OSError, "Publish failed"):
+                pixiv._write_image_cache(target, b"replacement")
+        self.assertEqual(target.read_bytes(), self.payload)
+        self.assertEqual(list(self.folder.glob("*.tmp")), [])
 
     def test_preserving_original_bytes_never_decodes_pixel_buffers(self):
         with patch.object(
@@ -300,7 +340,10 @@ class PixivImageTests(IsolatedAsyncioTestCase):
                 )
                 cancelled = asyncio.Event()
 
-                async def stalled_worker(fn, payload, limit, **kwargs):
+                async def stalled_worker(fn, *args, **kwargs):
+                    if fn is not pixiv._prepare_image:
+                        return fn(*args, **kwargs)
+                    payload, limit = args
                     if (
                         stage != "validation"
                         and limit == 0
@@ -331,4 +374,8 @@ class PixivImageTests(IsolatedAsyncioTestCase):
                     self.assertIsNone(await self.module._download(item, self.item, 0))
                 self.assertTrue(cancelled.is_set())
                 fetch.assert_awaited_once()
-                self.assertEqual(worker.await_count, 1 if stage == "validation" else 2)
+                preparation_calls = sum(
+                    call.args[0] is pixiv._prepare_image
+                    for call in worker.await_args_list
+                )
+                self.assertEqual(preparation_calls, 1 if stage == "validation" else 2)

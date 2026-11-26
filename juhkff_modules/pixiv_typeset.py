@@ -318,8 +318,9 @@ def render_translation(image: Path, regions: list[dict], font_path: str = "") ->
     Args:
         image: Existing local source image path.
         regions: At most 64 dictionaries with normalized 0..1000 bbox, nonempty
-            text and horizontal/vertical direction. Optional bubble must enclose
+            text and horizontal/vertical direction. Optional bubble should enclose
             bbox and describe an interior rectangle, excluding artwork/borders.
+            Non-enclosing bubbles use the margin without changing source pixels.
         font_path: Optional local TrueType/OpenType font; otherwise probe common
             Noto, WenQuanYi, macOS and Windows CJK font locations.
 
@@ -335,6 +336,7 @@ def render_translation(image: Path, regions: list[dict], font_path: str = "") ->
     if not isinstance(regions, list) or not 1 <= len(regions) <= MAX_REGIONS:
         raise ValueError("regions must contain 1..64 entries")
     cleaned = []
+    margin_only = set()
     total_text = 0
     for region in regions:
         if not isinstance(region, dict):
@@ -372,7 +374,9 @@ def render_translation(image: Path, regions: list[dict], font_path: str = "") ->
         if "bubble" in entry:
             b, t = entry["bubble"], entry["bbox"]
             if not (b[0] <= t[0] and b[1] <= t[1] and b[2] >= t[2] and b[3] >= t[3]):
-                raise ValueError("bubble must enclose bbox")
+                # Keep both rectangles as obstacles for other translations, but
+                # never erase or place this uncertain region on the source image.
+                margin_only.add(len(cleaned))
         cleaned.append(entry)
     if total_text > 12000:
         raise ValueError("total translation length exceeds 12000 characters")
@@ -445,6 +449,9 @@ def render_translation(image: Path, regions: list[dict], font_path: str = "") ->
         for size in range(32, 11, -1)
     ]
     for index, entry in enumerate(cleaned):
+        if index in margin_only:
+            pending.append((index + 1, entry))
+            continue
         placement, budget = _local_placement(
             original, entry, index, boxes, bubbles, occupied, fonts, budget
         )

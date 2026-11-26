@@ -249,6 +249,59 @@ class PixivTypesetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "No usable font"):
                 typeset.render_translation(self.path, [self.region])
 
+    def test_non_enclosing_bubble_uses_margin_and_preserves_source(self):
+        # Model coordinates can differ by a fraction or miss the text entirely.
+        for bubble in ([250.1, 250, 550, 500], [300, 300, 400, 400], [0, 0, 100, 100]):
+            with self.subTest(bubble=bubble):
+                ImageDraw.Draw(self.source).rectangle(
+                    (110, 115, 120, 125), fill="black"
+                )
+                result = self.render([dict(self.region, bubble=bubble)])
+                self.assertGreater(result.width, self.source.width)
+                self.assertIsNone(
+                    ImageChops.difference(
+                        result.crop((0, 0, 400, 400)), self.source
+                    ).getbbox()
+                )
+                self.assertIsNotNone(
+                    ImageChops.difference(
+                        result.crop((400, 0, result.width, result.height)),
+                        Image.new("RGB", (result.width - 400, result.height), "white"),
+                    ).getbbox()
+                )
+
+    def test_non_enclosing_bubble_still_blocks_other_notes(self):
+        uncertain = dict(
+            self.region,
+            bbox=[700, 700, 800, 800],
+            bubble=[0, 460, 650, 1000],
+            text="Uncertain",
+        )
+        result = self.render([self.region, uncertain])
+        self.assertGreater(result.width, 400)
+        self.assertIsNone(
+            ImageChops.difference(result.crop((0, 0, 400, 400)), self.source).getbbox()
+        )
+
+    def test_bad_bubble_keeps_other_valid_regions(self):
+        uncertain = dict(self.region, bubble=[200, 460, 550, 1000], text="Uncertain")
+        valid = dict(
+            self.region,
+            bbox=[700, 250, 800, 450],
+            bubble=[650, 200, 850, 500],
+            text="Hi",
+        )
+        ImageDraw.Draw(self.source).rectangle((285, 115, 290, 125), fill="black")
+        result = self.render([uncertain, valid])
+        self.assertGreater(result.width, 400)
+        self.assertEqual(result.getpixel((287, 120)), (255, 255, 255))
+        self.assertIsNone(
+            ImageChops.difference(
+                result.crop((80, 100, 220, 400)),
+                self.source.crop((80, 100, 220, 400)),
+            ).getbbox()
+        )
+
     def test_invalid_contract_is_rejected(self):
         self.source.save(self.path)
         bad = [
@@ -257,7 +310,6 @@ class PixivTypesetTests(unittest.TestCase):
             dict(self.region, bbox=[True, 0, 20, 30]),
             dict(self.region, bbox=[float("nan"), 0, 20, 30]),
             dict(self.region, bbox=[0, 0, 20]),
-            dict(self.region, bubble=[300, 300, 400, 400]),
             dict(self.region, bubble=None),
             dict(self.region, direction="diagonal"),
             dict(self.region, text=""),

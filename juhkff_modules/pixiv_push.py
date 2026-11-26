@@ -947,7 +947,7 @@ class PixivPushModule(
                                 "Cached Pixiv image exceeds the download limit"
                             )
                         payload = (
-                            candidate.read_bytes()
+                            await asyncio.to_thread(candidate.read_bytes)
                             if isinstance(candidate, Path)
                             else await fetch_bytes(
                                 candidate,
@@ -988,9 +988,9 @@ class PixivPushModule(
                         raw_bytes, suffix = raw
                         target = folder / f"{kind}{suffix}"
                         if not isinstance(candidate, Path):
-                            temporary = target.with_suffix(suffix + ".tmp")
-                            temporary.write_bytes(raw_bytes)
-                            temporary.replace(target)
+                            await asyncio.to_thread(
+                                _write_image_cache, target, raw_bytes
+                            )
                         if not compatible and (limit == 0 or len(raw_bytes) <= limit):
                             return target
                         stage = "compatibility" if compatible else "compression"
@@ -1000,10 +1000,11 @@ class PixivPushModule(
                             else f"{kind}_{limit}.jpg"
                         )
                         if compatible and derivative.is_file():
+                            cached_payload = await asyncio.to_thread(
+                                derivative.read_bytes
+                            )
                             cached = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    _prepare_image, derivative.read_bytes(), 0
-                                ),
+                                asyncio.to_thread(_prepare_image, cached_payload, 0),
                                 timeout=_IMAGE_PROCESS_TIMEOUT,
                             )
                             if (
@@ -1045,16 +1046,7 @@ class PixivPushModule(
                             # Animated images keep every frame and their source format.
                             return target
                         target = derivative.with_suffix(suffix)
-                        with tempfile.NamedTemporaryFile(
-                            dir=folder,
-                            prefix=target.stem + "_",
-                            suffix=".tmp",
-                            delete=False,
-                        ) as output:
-                            output.write(compressed)
-                            temporary = Path(output.name)
-                        temporary.chmod(0o644)
-                        temporary.replace(target)
+                        await asyncio.to_thread(_write_image_cache, target, compressed)
                         return target
                     except asyncio.TimeoutError:
                         self.log.warning(
@@ -1231,6 +1223,27 @@ def _mirror(url: str) -> str:
     """
     match = re.match(r"https?://i\.pximg\.net/(.*)$", url)
     return f"{MIRROR}/{match.group(1)}" if match else ""
+
+
+def _write_image_cache(target: Path, payload: bytes) -> None:
+    """Publish a complete cache file from a worker thread.
+
+    Args:
+        target: Cache path whose parent directory already exists.
+        payload: Validated image bytes to store.
+    """
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=target.stem + "_", suffix=".tmp", delete=False
+        ) as output:
+            temporary = Path(output.name)
+            output.write(payload)
+        temporary.chmod(0o644)
+        temporary.replace(target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _prepare_image(
