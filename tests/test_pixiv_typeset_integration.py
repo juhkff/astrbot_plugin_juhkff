@@ -274,6 +274,31 @@ class PixivTypesetIntegrationTests(IsolatedAsyncioTestCase):
                     "test-key",
                 )
 
+    async def test_empty_ocr_original_result_has_no_failure_notice(self):
+        for transport in ("file", "base64"):
+            self.host.cfg["image_transport"] = transport
+            with (
+                self.subTest(transport=transport),
+                patch.object(
+                    baidu,
+                    "translate_image",
+                    new_callable=AsyncMock,
+                    return_value=self.images[0],
+                ),
+            ):
+                result = must(await self.host._render_items([item()], self.umo))
+            self.assertEqual(len(result.chain), 2)
+            image = result.chain[1]
+            self.assertEqual(image.type, ComponentType.Image)
+            if transport == "file":
+                self.assertEqual(image.file, self.images[0].as_uri())
+            else:
+                self.assertEqual(
+                    base64.b64decode(await image.convert_to_base64()),
+                    self.images[0].read_bytes(),
+                )
+            self.context.llm_generate.assert_not_awaited()
+
     async def test_missing_credentials_preserve_original_without_model_fallback(self):
         for missing in ("app_id", "app_key", "typesetting"):
             with self.subTest(missing=missing):

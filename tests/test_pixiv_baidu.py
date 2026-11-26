@@ -195,12 +195,18 @@ class PixivBaiduTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(alias=alias):
                 self.assertEqual(baidu.LANGUAGES[alias.casefold()], expected)
-        self.assertEqual(len(baidu._LANGUAGE_GROUPS), 21)
-        self.assertEqual(baidu.LANGUAGES["traditional chinese"], "cht")
-        self.assertEqual(baidu.LANGUAGES["繁體中文"], "cht")
+        self.assertEqual(len(baidu._LANGUAGE_GROUPS), 20)
 
     async def test_invalid_configuration_never_sends_requests(self):
-        for language in ["Klingon", "translate into Chinese please", "", None, "auto"]:
+        for language in [
+            "Klingon",
+            "translate into Chinese please",
+            "",
+            None,
+            "auto",
+            "cht",
+            "繁體中文",
+        ]:
             with (
                 self.subTest(language=language),
                 self.assertRaisesRegex(ValueError, "Unsupported"),
@@ -267,10 +273,33 @@ class PixivBaiduTests(unittest.IsolatedAsyncioTestCase):
                 await self.translate()
         self.assertEqual(self.requests, [])
 
-    async def test_tall_images_use_broad_local_safety_bounds(self):
-        Image.new("RGB", (10, 5000), "white").save(self.source)
-        await self.translate()
-        self.assertEqual(len(self.requests), 1)
+    async def test_api_input_dimensions_reject_before_upload(self):
+        for size in [(29, 30), (4097, 2000), (30, 91), (91, 30)]:
+            Image.new("RGB", size, "white").save(self.source)
+            with (
+                self.subTest(size=size),
+                self.assertRaisesRegex(ValueError, "input dimensions"),
+            ):
+                await self.translate()
+        self.assertEqual(self.requests, [])
+        for size in [(30, 90), (90, 30), (4096, 1366)]:
+            Image.new("RGB", size, "white").save(self.source)
+            await self.translate()
+        self.assertEqual(len(self.requests), 3)
+
+    async def test_empty_ocr_returns_original_without_retry_or_cache(self):
+        for code in ["69004", 69004]:
+            self.body = json.dumps({"error_code": code}).encode()
+            with self.subTest(code=code):
+                self.assertEqual(await self.translate(), self.source)
+                self.assertEqual(self.source.read_bytes(), self.original)
+        self.assertEqual(len(self.requests), 2)
+        self.assertFalse(list(self.source.parent.glob(".baidu-*")))
+
+    async def test_failed_ocr_remains_an_error(self):
+        self.body = b'{"error_code":"69003"}'
+        with self.assertRaisesRegex(RuntimeError, "69003"):
+            await self.translate()
 
     async def test_declared_and_streamed_response_limits(self):
         self.body = self.response(self.png) + b" " * 1000

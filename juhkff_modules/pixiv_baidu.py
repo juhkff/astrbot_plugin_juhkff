@@ -21,10 +21,9 @@ MAX_RESPONSE_BYTES = 24 * 1024 * 1024
 MAX_SIDE = 16384
 MAX_PIXELS = 40_000_000
 
-# Picture language codes, including the traditional Chinese target variant.
+# Target language codes from the official picture API documentation.
 _LANGUAGE_GROUPS = {
     "zh": "zh-cn zh-hans Chinese 中文 简体中文 简体",
-    "cht": "zh-tw zh-hk zh-hant traditional-chinese 繁体中文 繁體中文 繁体 繁體",
     "en": "English 英语 英文",
     "jp": "ja Japanese 日语 日本語 日文",
     "kor": "ko Korean 韩语 韓語",
@@ -54,8 +53,6 @@ LANGUAGES.update(
     {
         "simplified chinese": "zh",
         "chinese (simplified)": "zh",
-        "traditional chinese": "cht",
-        "chinese (traditional)": "cht",
     }
 )
 
@@ -83,11 +80,12 @@ def _read_bounded(path: Path, limit: int) -> bytes:
     return data
 
 
-def _verify_image(data: bytes) -> str:
+def _verify_image(data: bytes, *, source: bool = False) -> str:
     """Check image integrity and dimensions without decoding a full pixel buffer.
 
     Args:
         data: Bounded PNG or JPEG image bytes.
+        source: Whether to enforce the API input dimensions.
 
     Returns:
         File extension matching the image's actual format.
@@ -108,6 +106,15 @@ def _verify_image(data: bytes) -> str:
                 raise ValueError(
                     "Baidu image exceeds local safety dimensions (16384px per side "
                     "or 40 million pixels); resize or crop the image before translating"
+                )
+            if source and (
+                min(width, height) < 30
+                or max(width, height) > 4096
+                or max(width, height) > 3 * min(width, height)
+            ):
+                raise ValueError(
+                    "Baidu input dimensions require a minimum side of 30px, "
+                    "a maximum side of 4096px, and an aspect ratio at most 3:1"
                 )
             extension = ".png" if image.format == "PNG" else ".jpg"
             if extension == ".jpg" and b"\xff\xd9" not in data:
@@ -130,7 +137,7 @@ async def translate_image(
         app_key: Application secret for an account with picture translation enabled.
 
     Returns:
-        Path to the cached PNG or JPEG result.
+        Path to the cached result, or the source when OCR finds no text.
 
     Raises:
         ValueError: Configuration, input, or response is invalid or too large.
@@ -145,7 +152,7 @@ async def translate_image(
     app_id, app_key = app_id.strip(), app_key.strip()
     image = Path(image)
     source = await asyncio.to_thread(_read_bounded, image, MAX_IMAGE_BYTES)
-    extension = await asyncio.to_thread(_verify_image, source)
+    extension = await asyncio.to_thread(_verify_image, source, source=True)
     digest = hashlib.sha256(source)
     digest.update(json.dumps([target, app_id, API_VERSION]).encode())
     stem = f".baidu-{digest.hexdigest()}"
@@ -252,6 +259,9 @@ async def translate_image(
                 "Baidu picture translation returned invalid JSON structure"
             )
         code = str(payload.get("error_code", "0"))
+        if code == "69004":
+            # Empty OCR is a valid no-op; do not assume the source is truly text-free.
+            return image
         if code != "0":
             # Never echo provider messages: they may contain credentials or input.
             label = (
