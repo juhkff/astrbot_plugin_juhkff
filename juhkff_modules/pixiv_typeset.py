@@ -9,14 +9,20 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-MIN_FONT_SIZE = 14
-MAX_FONT_SIZE = 32
+MIN_FONT_SIZE = 20
+MAX_FONT_SIZE = 128
 MAX_PIXELS = 25_000_000
 MAX_REGIONS = 64
 MAX_REGION_CHARACTERS = 2000
 MAX_TOTAL_CHARACTERS = 12000
-GAP = 4
-PADDING = 2
+GAP = 8
+PADDING = 6
+TEXT_COLOR = (24, 55, 105)
+STROKE_COLOR = (255, 255, 255)
+_LINEAR_RGB = tuple(
+    value / 3294.6 if value <= 10 else ((value / 255 + 0.055) / 1.055) ** 2.4
+    for value in range(256)
+)
 FONT_CANDIDATES = (
     str(Path(__file__).parent / "fonts" / "NotoSansCJK-Regular.ttc"),
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -31,7 +37,9 @@ FONT_CANDIDATES = (
 )
 
 
-def _place_translation(text, font, box, direction, image_size):
+def _place_translation(
+    text, font, box, direction, image_size, source_boxes=(), placed_boxes=()
+):
     """Wrap glyphs and choose the requested side using their actual extent.
 
     Args:
@@ -40,6 +48,8 @@ def _place_translation(text, font, box, direction, image_size):
         box: Source text rectangle in pixels.
         direction: Horizontal lines or vertical right-to-left columns.
         image_size: Source image width and height.
+        source_boxes: All recognized source rectangles to avoid.
+        placed_boxes: Previously placed translation label rectangles to avoid.
 
     Returns:
         A translation rectangle and glyph coordinates relative to that rectangle.
@@ -50,12 +60,14 @@ def _place_translation(text, font, box, direction, image_size):
     width, height = image_size
     left, top, right, bottom = box
     vertical = direction == "vertical"
+    padding = max(PADDING, round(font.size * 0.25))
+    gap = max(GAP, round(font.size * 0.4))
     # Wrap along the source span, with a modest minimum for very small boxes.
     span = min(
         height if vertical else width,
         max(bottom - top if vertical else right - left, (font.size + 4) * 4),
     )
-    limit = span - 2 * PADDING
+    limit = span - 2 * padding
     cell = font.size + 4
     positions = []
     along = cross = 0
@@ -64,7 +76,7 @@ def _place_translation(text, font, box, direction, image_size):
         if char == "\n":
             along, cross = 0, cross + cell
             continue
-        bounds = font.getbbox(char, stroke_width=1)
+        bounds = font.getbbox(char, stroke_width=2)
         glyph_width = bounds[2] - bounds[0]
         glyph_height = bounds[3] - bounds[1]
         advance = (
@@ -84,44 +96,128 @@ def _place_translation(text, font, box, direction, image_size):
     text_width, text_height = (
         (extent_cross, extent_along) if vertical else (extent_along, extent_cross)
     )
-    text_width += 2 * PADDING
-    text_height += 2 * PADDING
+    text_width += 2 * padding
+    text_height += 2 * padding
     if text_width > width or text_height > height:
         raise ValueError("wrapped translation exceeds image dimensions")
     if vertical:
-        if left - GAP >= text_width:
-            x = left - GAP - text_width
-        elif width - right - GAP >= text_width:
-            x = right + GAP
-        else:
-            raise ValueError("translation has no room left or right of source")
-        y = min(max(0, top), height - text_height)
         # The first vertical column is nearest the original text on the left.
         positions = [(extent_cross - cell + px, py, c) for px, py, c in positions]
-    else:
-        if height - bottom - GAP >= text_height:
-            y = bottom + GAP
-        elif top - GAP >= text_height:
-            y = top - GAP - text_height
+    positions = [(padding + px, padding + py, c) for px, py, c in positions]
+    obstacles = [box, *source_boxes, *placed_boxes]
+    # Try the preferred side first, jumping past every intersecting rectangle.
+    # Each jump clears at least one obstacle, so work stays bounded by the input.
+    for preferred in (True, False):
+        if vertical:
+            x = left - gap - text_width if preferred else right + gap
+            y = min(max(0, top), height - text_height)
         else:
-            raise ValueError("translation has no room below or above source")
-        x = min(max(0, left), width - text_width)
-    return (x, y, x + text_width, y + text_height), positions
+            x = min(max(0, left), width - text_width)
+            y = bottom + gap if preferred else top - gap - text_height
+        for _ in range(len(obstacles) + 1):
+            if x < 0 or y < 0 or x + text_width > width or y + text_height > height:
+                break
+            blockers = [
+                obstacle
+                for obstacle in obstacles
+                if x < obstacle[2] + gap
+                and x + text_width > obstacle[0] - gap
+                and y < obstacle[3] + gap
+                and y + text_height > obstacle[1] - gap
+            ]
+            if not blockers:
+                return (x, y, x + text_width, y + text_height), positions
+            if vertical:
+                x = (
+                    min(obstacle[0] for obstacle in blockers) - gap - text_width
+                    if preferred
+                    else max(obstacle[2] for obstacle in blockers) + gap
+                )
+            else:
+                y = (
+                    max(obstacle[3] for obstacle in blockers) + gap
+                    if preferred
+                    else min(obstacle[1] for obstacle in blockers) - gap - text_height
+                )
+    raise ValueError("translation has no collision-free room beside source")
+
+
+def _choose_text_colors(
+    image: Image.Image, rect: tuple[int, int, int, int]
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """Choose outlined text from at most 256 local background samples.
+
+    Prefer blue when its lower contrast quintile reaches 4.5:1; otherwise use
+    the white/black pair with the stronger lower quintile and mean contrast.
+    The outline contrasts with the fill to help on mixed backgrounds. Samples
+    with transparency are evaluated over both black and white viewing mattes,
+    because the eventual chat viewer's background is unknown. No pixels change.
+
+    Args:
+        image: Unmodified RGB or RGBA canvas.
+        rect: Positive-area translation rectangle within the canvas.
+
+    Returns:
+        RGB fill and outline colors with contrasting lightness.
+    """
+    left, top, right, bottom = rect
+    columns = min(16, right - left)
+    rows = min(16, bottom - top)
+    luminances = []
+    for row in range(rows):
+        y = top + (2 * row + 1) * (bottom - top) // (2 * rows)
+        for column in range(columns):
+            x = left + (2 * column + 1) * (right - left) // (2 * columns)
+            pixel = image.getpixel((x, y))
+            alpha = pixel[3] if len(pixel) == 4 else 255
+            for matte in (0, 255) if alpha < 255 else (0,):
+                channels = tuple(
+                    (channel * alpha + matte * (255 - alpha) + 127) // 255
+                    for channel in pixel[:3]
+                )
+                luminances.append(
+                    0.2126 * _LINEAR_RGB[channels[0]]
+                    + 0.7152 * _LINEAR_RGB[channels[1]]
+                    + 0.0722 * _LINEAR_RGB[channels[2]]
+                )
+    candidates = (
+        (TEXT_COLOR, STROKE_COLOR),
+        ((255, 255, 255), (0, 0, 0)),
+        ((0, 0, 0), (255, 255, 255)),
+    )
+    scores = []
+    for fill, _ in candidates:
+        luminance = (
+            0.2126 * _LINEAR_RGB[fill[0]]
+            + 0.7152 * _LINEAR_RGB[fill[1]]
+            + 0.0722 * _LINEAR_RGB[fill[2]]
+        )
+        contrasts = sorted(
+            (max(luminance, value) + 0.05) / (min(luminance, value) + 0.05)
+            for value in luminances
+        )
+        scores.append((contrasts[len(contrasts) // 5], sum(contrasts) / len(contrasts)))
+    if scores[0][0] >= 4.5:
+        return candidates[0]
+    return candidates[max(range(1, len(candidates)), key=scores.__getitem__)]
 
 
 def render_translation(image: Path, regions: list[dict]) -> Path:
     """Render translations beside original text without erasing source pixels.
 
     All image and filesystem operations are synchronous. Callers in async code
-    should use asyncio.to_thread. No artwork or other-region collision detection
-    is performed. Insufficient space raises ValueError rather than clipping text.
+    should use asyncio.to_thread. Labels avoid recognized source rectangles and
+    earlier labels. Sparse local samples choose contrasting ink; artwork is not
+    scanned for placement or erased. Insufficient space raises ValueError rather
+    than shrinking or clipping text.
 
     Args:
         image: Local source image, preserved unchanged.
         regions: Up to 64 dictionaries containing a normalized bbox, direction
             (horizontal or vertical), translation, and optional positive finite
             font_size in source pixels. Coordinates are clipped to 0..1000.
-            Font size is 85 percent of the estimate, bounded to 14..32 pixels.
+            Font size is 90 percent of the estimate, bounded by image-adaptive
+            limits (20..64 pixel floor and up to 128 pixel ceiling).
 
     Returns:
         A separate atomic PNG beside the source, or image for empty regions.
@@ -204,38 +300,60 @@ def render_translation(image: Path, regions: list[dict]) -> Path:
                 continue
         if font_path is None:
             raise ValueError("no existing CJK font available for translation")
-        draw = ImageDraw.Draw(rendered)
-        for text, direction, normalized_box, estimate in cleaned:
-            box = (
-                math.floor(normalized_box[0] * width / 1000),
-                math.floor(normalized_box[1] * height / 1000),
-                math.ceil(normalized_box[2] * width / 1000),
-                math.ceil(normalized_box[3] * height / 1000),
+        short_edge = min(width, height)
+        minimum = max(MIN_FONT_SIZE, min(64, round(short_edge * 0.024)))
+        maximum = max(minimum, min(MAX_FONT_SIZE, round(short_edge * 0.06)))
+        source_boxes = [
+            (
+                math.floor(box[0] * width / 1000),
+                math.floor(box[1] * height / 1000),
+                math.ceil(box[2] * width / 1000),
+                math.ceil(box[3] * height / 1000),
             )
+            for _, _, box, _ in cleaned
+        ]
+        labels = []
+        placed_boxes = []
+        for (text, direction, _, estimate), box in zip(cleaned, source_boxes):
             if estimate is None:
                 estimate = (
                     box[2] - box[0] if direction == "vertical" else box[3] - box[1]
                 )
             size = max(
-                MIN_FONT_SIZE,
-                round(min(estimate, MAX_FONT_SIZE / 0.85) * 0.85),
+                minimum,
+                round(min(estimate, maximum / 0.90) * 0.90),
             )
             font = ImageFont.truetype(font_path, size)
             rect, positions = _place_translation(
-                text, font, box, direction, rendered.size
+                text, font, box, direction, rendered.size, source_boxes, placed_boxes
             )
+            fill, stroke = _choose_text_colors(rendered, rect)
+            labels.append((font, rect, positions, fill, stroke))
+            placed_boxes.append(rect)
+        draw = ImageDraw.Draw(rendered)
+        for font, rect, positions, fill, stroke in labels:
             for x, y, char in positions:
                 draw.text(
-                    (rect[0] + PADDING + x, rect[1] + PADDING + y),
+                    (rect[0] + x, rect[1] + y),
                     char,
                     font=font,
-                    fill="black",
+                    fill=fill,
+                    stroke_width=2,
+                    stroke_fill=stroke,
+                )
+                # Thicken the solid ink inside a one-pixel outer contour.
+                # Regular CJK fonts otherwise look hollow after downscaling.
+                draw.text(
+                    (rect[0] + x, rect[1] + y),
+                    char,
+                    font=font,
+                    fill=fill,
                     stroke_width=1,
-                    stroke_fill="white",
+                    stroke_fill=fill,
                 )
         digest = hashlib.sha256(image.read_bytes())
         digest.update(json.dumps(cleaned, ensure_ascii=True).encode())
-        digest.update(f"simple-overlay-v1:{font_path}".encode())
+        digest.update(f"solid-adaptive-ink-v5:{font_path}".encode())
         output = image.parent / f"{image.stem}.translated-{digest.hexdigest()}.png"
         with tempfile.NamedTemporaryFile(
             dir=image.parent, prefix=".pixiv-typeset-", suffix=".png", delete=False

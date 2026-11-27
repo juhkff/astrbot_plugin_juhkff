@@ -103,7 +103,11 @@ class PixivTypesetTests(unittest.TestCase):
                     ],
                 )
                 rect, _ = typeset._place_translation(
-                    "中文", self.font, (40, 40, 120, 80), "horizontal", (400, 400)
+                    "中文",
+                    ImageFont.truetype(self.font.path, 22),
+                    (40, 40, 120, 80),
+                    "horizontal",
+                    (400, 400),
                 )
                 with Image.open(output) as rendered:
                     self.assertEqual(rendered.mode, "RGBA")
@@ -132,16 +136,16 @@ class PixivTypesetTests(unittest.TestCase):
                     self.assertGreaterEqual(rect[0], box[2] + typeset.GAP)
                     self.assertGreater(rect[2] - rect[0], self.font.size * 2)
                 # Reconstruct the real glyph mask to verify every wrapped glyph
-                # lies inside the measured rectangle including its white stroke.
+                # lies inside the measured rectangle including its stroke.
                 layer = Image.new("RGB", size, "white")
                 draw = ImageDraw.Draw(layer)
                 for x, y, char in glyphs:
                     draw.text(
-                        (rect[0] + typeset.PADDING + x, rect[1] + typeset.PADDING + y),
+                        (rect[0] + x, rect[1] + y),
                         char,
                         font=self.font,
                         fill="black",
-                        stroke_width=1,
+                        stroke_width=2,
                         stroke_fill="black",
                     )
                 ink = ImageChops.difference(
@@ -152,9 +156,39 @@ class PixivTypesetTests(unittest.TestCase):
                 self.assertLessEqual(ink[2], rect[2])
                 self.assertLessEqual(ink[3], rect[3])
 
-    def test_translation_font_is_smaller_and_hard_bounded(self):
+    def test_large_glyphs_and_punctuation_stay_inside_label_padding(self):
+        for size in (48, 128):
+            font = ImageFont.truetype(self.font.path, size)
+            padding = max(typeset.PADDING, round(size * 0.25))
+            for direction in ("horizontal", "vertical"):
+                with self.subTest(size=size, direction=direction):
+                    rect, positions = typeset._place_translation(
+                        "中文g（！）…" * 2,
+                        font,
+                        (800, 600, 1200, 1000),
+                        direction,
+                        (2000, 2000),
+                    )
+                    layer = Image.new("L", (2000, 2000), 0)
+                    draw = ImageDraw.Draw(layer)
+                    for x, y, char in positions:
+                        draw.text(
+                            (rect[0] + x, rect[1] + y),
+                            char,
+                            font=font,
+                            fill=255,
+                            stroke_width=2,
+                            stroke_fill=255,
+                        )
+                    ink = layer.getbbox()
+                    self.assertGreaterEqual(ink[0], rect[0] + padding)
+                    self.assertGreaterEqual(ink[1], rect[1] + padding)
+                    self.assertLessEqual(ink[2], rect[2] - padding)
+                    self.assertLessEqual(ink[3], rect[3] - padding)
+
+    def test_translation_font_is_adaptive_and_hard_bounded(self):
         real_place = typeset._place_translation
-        for estimate, expected in ((1, 14), (24, 20), (1000, 32), (10**400, 32)):
+        for estimate, expected in ((1, 20), (24, 22), (1000, 24), (10**400, 24)):
             with self.subTest(estimate=estimate):
                 with patch.object(
                     typeset, "_place_translation", wraps=real_place
@@ -186,7 +220,255 @@ class PixivTypesetTests(unittest.TestCase):
                     }
                 ],
             )
-        self.assertEqual(place.call_args.args[1].size, 17)
+        self.assertEqual(place.call_args.args[1].size, 20)
+
+    def test_large_image_uses_readable_adaptive_font_floor(self):
+        Image.new("RGB", (2000, 2400), "white").save(self.source)
+        with patch.object(
+            typeset, "_place_translation", wraps=typeset._place_translation
+        ) as place:
+            typeset.render_translation(
+                self.source,
+                [
+                    {
+                        "bbox": [250, 250, 500, 300],
+                        "direction": "horizontal",
+                        "translation": "中文",
+                        "font_size": 1,
+                    }
+                ],
+            )
+        self.assertEqual(place.call_args.args[1].size, 48)
+
+    def test_color_pairs_contrast_with_light_dark_and_midgray_backgrounds(self):
+        cases = (
+            ((255, 255, 255), (typeset.TEXT_COLOR, (255, 255, 255))),
+            ((10, 10, 10), ((255, 255, 255), (0, 0, 0))),
+            ((128, 128, 128), ((0, 0, 0), (255, 255, 255))),
+        )
+        for background, expected in cases:
+            with self.subTest(background=background):
+                image = Image.new("RGB", (400, 400), background)
+                self.assertEqual(
+                    typeset._choose_text_colors(image, (50, 50, 200, 100)), expected
+                )
+
+    def test_solid_ink_remains_visible_on_midgray_after_downscaling(self):
+        original = Image.new("RGB", (400, 400), (128, 128, 128))
+        original.save(self.source)
+        translation = "中灰背景的中文译文"
+        output = typeset.render_translation(
+            self.source,
+            [
+                {
+                    "bbox": [250, 250, 750, 350],
+                    "direction": "horizontal",
+                    "translation": translation,
+                    "font_size": 24,
+                }
+            ],
+        )
+        font = ImageFont.truetype(self.font.path, 22)
+        rect, positions = typeset._place_translation(
+            translation, font, (100, 100, 300, 140), "horizontal", original.size
+        )
+        thin = original.copy()
+        draw = ImageDraw.Draw(thin)
+        for x, y, char in positions:
+            draw.text(
+                (rect[0] + x, rect[1] + y),
+                char,
+                font=font,
+                fill="black",
+                stroke_width=1,
+                stroke_fill="white",
+            )
+        with Image.open(output) as solid:
+            for scale in (0.5, 0.375):
+                with self.subTest(scale=scale):
+                    size = (round(400 * scale), round(400 * scale))
+                    before = thin.resize(size, Image.Resampling.LANCZOS).convert("L")
+                    after = solid.resize(size, Image.Resampling.LANCZOS).convert("L")
+                    before_dark = sum(value < 80 for value in before.getdata())
+                    after_dark = sum(value < 80 for value in after.getdata())
+                    self.assertGreater(before_dark, 0)
+                    self.assertGreater(after_dark, before_dark * 1.3)
+
+    def test_separate_labels_sample_their_own_background_before_drawing(self):
+        original = Image.new("RGB", (400, 400), "white")
+        ImageDraw.Draw(original).rectangle((200, 0, 399, 399), fill="black")
+        original.save(self.source)
+        regions = [
+            {
+                "bbox": bbox,
+                "direction": "horizontal",
+                "translation": "中文",
+                "font_size": 24,
+            }
+            for bbox in ([250, 250, 500, 350], [625, 250, 875, 350])
+        ]
+        sampled_images = []
+        real_choose = typeset._choose_text_colors
+
+        def choose_colors(canvas, rect):
+            sampled_images.append(canvas.tobytes())
+            return real_choose(canvas, rect)
+
+        with patch.object(typeset, "_choose_text_colors", side_effect=choose_colors):
+            output = typeset.render_translation(self.source, regions)
+        # Both selections see the untouched original, rather than earlier ink.
+        self.assertEqual(sampled_images, [original.tobytes(), original.tobytes()])
+        with Image.open(output) as rendered:
+            left_colors = {
+                color for _, color in rendered.crop((0, 140, 200, 200)).getcolors(40000)
+            }
+            right_colors = {
+                color
+                for _, color in rendered.crop((200, 140, 400, 200)).getcolors(40000)
+            }
+        self.assertIn(typeset.TEXT_COLOR, left_colors)
+        self.assertIn((255, 255, 255), right_colors)
+
+    def test_transparent_samples_ignore_hidden_rgb_and_sampling_stays_local(self):
+        rect = (63, 71, 319, 287)
+        pairs = []
+        for hidden in (0, 255):
+            image = Image.new("RGBA", (400, 400), (hidden, hidden, hidden, 0))
+            with patch.object(image, "getpixel", wraps=image.getpixel) as sample:
+                pairs.append(typeset._choose_text_colors(image, rect))
+            self.assertEqual(sample.call_count, 256)
+            for call in sample.call_args_list:
+                x, y = call.args[0]
+                self.assertTrue(rect[0] <= x < rect[2] and rect[1] <= y < rect[3])
+        self.assertEqual(pairs[0], pairs[1])
+        self.assertEqual(set(pairs[0]), {(0, 0, 0), (255, 255, 255)})
+
+    def test_only_adaptive_glyphs_and_outlines_change_source_pixels(self):
+        font = ImageFont.truetype(self.font.path, 22)
+        rect, positions = typeset._place_translation(
+            "中文", font, (100, 100, 200, 140), "horizontal", (400, 400)
+        )
+        mask = Image.new("L", (400, 400), 0)
+        draw = ImageDraw.Draw(mask)
+        for x, y, char in positions:
+            draw.text(
+                (rect[0] + x, rect[1] + y),
+                char,
+                font=font,
+                fill=255,
+                stroke_width=2,
+                stroke_fill=255,
+            )
+        mask = mask.point(lambda value: 255 if value else 0)
+        for mode, background in (("RGB", (70, 100, 150)), ("RGBA", (30, 60, 90, 70))):
+            with self.subTest(mode=mode):
+                original = Image.new(mode, (400, 400), background)
+                original.save(self.source)
+                output = typeset.render_translation(
+                    self.source,
+                    [
+                        {
+                            "bbox": [250, 250, 500, 350],
+                            "direction": "horizontal",
+                            "translation": "中文",
+                            "font_size": 24,
+                        }
+                    ],
+                )
+                with Image.open(output) as rendered:
+                    expected = original.copy()
+                    expected.paste(rendered, mask=mask)
+                    self.assertEqual(rendered.tobytes(), expected.tobytes())
+                    self.assertNotEqual(rendered.tobytes(), original.tobytes())
+                    self.assertEqual(rendered.getpixel((rect[0], rect[1])), background)
+                    colors = {
+                        color[:3]
+                        for _, color in rendered.getcolors(maxcolors=400 * 400)
+                    }
+                    fill, stroke = typeset._choose_text_colors(original, rect)
+                    self.assertIn(fill, colors)
+                    self.assertIn(stroke, colors)
+
+    def test_labels_skip_all_source_boxes_and_previous_labels(self):
+        regions = [
+            {
+                "bbox": [250, 200, 500, 300],
+                "direction": "horizontal",
+                "translation": "中文",
+                "font_size": 20,
+            },
+            {
+                "bbox": [250, 310, 500, 410],
+                "direction": "horizontal",
+                "translation": "中文",
+                "font_size": 20,
+            },
+        ]
+        original = Image.new("RGB", (400, 400), "white")
+        boxes = [(100, 80, 200, 120), (100, 124, 200, 164)]
+        for box in boxes:
+            ImageDraw.Draw(original).rectangle(
+                (box[0], box[1], box[2] - 1, box[3] - 1), fill="red"
+            )
+        original.save(self.source)
+        with patch.object(
+            typeset, "_place_translation", wraps=typeset._place_translation
+        ) as place:
+            output = typeset.render_translation(self.source, regions)
+        rects = []
+        for call in place.call_args_list:
+            # Reconstruct in rendering order without mock-retained mutable lists.
+            args = call.args[:5]
+            rect, _ = typeset._place_translation(*args, boxes, rects)
+            rects.append(rect)
+        self.assertGreaterEqual(rects[0][1], boxes[1][3] + typeset.GAP)
+        self.assertGreaterEqual(rects[1][1], rects[0][3] + typeset.GAP)
+        with Image.open(output) as rendered:
+            for box in boxes:
+                self.assertIsNone(
+                    ImageChops.difference(
+                        original.crop(box), rendered.crop(box)
+                    ).getbbox()
+                )
+
+    def test_blockers_on_each_side_have_font_scaled_clearance(self):
+        font = ImageFont.truetype(self.font.path, 40)
+        gap = round(font.size * 0.4)
+        for direction, box, blocker, side in (
+            ("horizontal", (100, 100, 300, 150), (100, 155, 300, 200), "below"),
+            ("horizontal", (100, 750, 300, 800), (100, 680, 300, 745), "above"),
+            ("vertical", (650, 100, 700, 300), (580, 100, 645, 300), "left"),
+            ("vertical", (0, 100, 50, 300), (55, 100, 120, 300), "right"),
+        ):
+            with self.subTest(side=side):
+                rect, _ = typeset._place_translation(
+                    "中文", font, box, direction, (800, 800), [box, blocker]
+                )
+                if side == "below":
+                    self.assertGreaterEqual(rect[1], blocker[3] + gap)
+                elif side == "above":
+                    self.assertLessEqual(rect[3], blocker[1] - gap)
+                elif side == "left":
+                    self.assertLessEqual(rect[2], blocker[0] - gap)
+                else:
+                    self.assertGreaterEqual(rect[0], blocker[2] + gap)
+
+    def test_collision_failure_creates_no_output(self):
+        regions = [
+            {
+                "bbox": [0, 0, 1000, 450],
+                "direction": "horizontal",
+                "translation": "中文",
+            },
+            {
+                "bbox": [0, 450, 1000, 1000],
+                "direction": "horizontal",
+                "translation": "中文",
+            },
+        ]
+        with self.assertRaisesRegex(ValueError, "collision-free"):
+            typeset.render_translation(self.source, regions)
+        self.assertEqual(list(self.folder.iterdir()), [self.source])
 
     def test_empty_regions_return_source_without_io(self):
         missing = self.folder / "does-not-exist.png"
