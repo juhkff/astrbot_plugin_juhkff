@@ -60,7 +60,7 @@ def migrate_pixiv_config(config: MutableMapping[str, Any]) -> bool:
         changed = True
     translation = settings.get("content_translation")
     if isinstance(translation, dict) and (
-        translation.get("method") not in ("off", "text", "overlay")
+        translation.get("method") not in ("off", "text", "overlay", "builtin")
         or (first_preferences_migration and translation.get("method") == "off")
     ):
         resolved_method = (

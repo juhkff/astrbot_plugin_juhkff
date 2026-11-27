@@ -1040,7 +1040,7 @@
       "content_translation": {
         "description": "图片文字翻译",
         "type": "object",
-        "hint": "纯文本使用识图模型，嵌字使用百度；R18 链接始终附纯文本译文。",
+        "hint": "纯文本使用识图模型，嵌字可选百度或内置排版；R18 链接始终附纯文本译文。",
         "items": {
           "method": {
             "description": "翻译方式",
@@ -1049,12 +1049,14 @@
             "options": [
               "off",
               "text",
-              "overlay"
+              "overlay",
+              "builtin"
             ],
             "labels": [
               "关闭",
               "纯文本",
-              "百度嵌字"
+              "百度嵌字",
+              "内置嵌字"
             ],
             "hint": "纯文本附在图片后；嵌字生成译文图片，失败时保留原图。"
           },
@@ -1123,6 +1125,16 @@
               "method": "text"
             },
             "hint": "留空沿用群聊模型，需支持图片；R18 链接翻译也沿用此设置。"
+          },
+          "builtin_provider_id": {
+            "description": "翻译模型",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "condition": {
+              "method": "builtin"
+            },
+            "hint": "需支持图片；留空沿用当前聊天模型。R18 链接也使用此模型附纯文本译文。"
           },
           "language": {
             "description": "翻译语言",
